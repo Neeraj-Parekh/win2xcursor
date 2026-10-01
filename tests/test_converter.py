@@ -108,6 +108,25 @@ class TestHelpers(unittest.TestCase):
             C.convert_input("/tmp/win2xcursor-no-such-file.zip", "X", out_dir="/tmp/x")
 
 
+class TestDropParsing(unittest.TestCase):
+    def test_braced_paths_with_spaces(self):
+        data = "{/tmp/My Cursor Pack/a.zip} /tmp/b.cur"
+        self.assertEqual(C.parse_drop_files(data),
+                         ["/tmp/My Cursor Pack/a.zip", "/tmp/b.cur"])
+
+    def test_ignores_blank(self):
+        self.assertEqual(C.parse_drop_files(""), [])
+
+    def test_is_cursor_source(self):
+        self.assertTrue(C.is_cursor_source("/tmp/x.zip"))
+        self.assertTrue(C.is_cursor_source("/tmp/x.ANI"))
+        self.assertTrue(C.is_cursor_source("/tmp/x.cur"))
+        self.assertFalse(C.is_cursor_source("/tmp/x.inf"))
+        self.assertFalse(C.is_cursor_source("/tmp/x.jpg"))
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertTrue(C.is_cursor_source(tmp))
+
+
 class TestThemeAssembly(unittest.TestCase):
     def test_write_theme_layout(self):
         frames = C.static_frames(make_cur(make_png()), "arrow")

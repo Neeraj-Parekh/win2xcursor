@@ -381,6 +381,24 @@ def cursors_from_single(data, name, tint=None, strength=0.0):
 def sanitize(name):
     return re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-") or "Theme"
 
+CURSOR_EXTS = (".cur", ".ani", ".zip")
+
+def is_cursor_source(path):
+    """True for convertible inputs: .cur/.ani/.zip files or directories."""
+    if os.path.isdir(path):
+        return True
+    return os.path.splitext(path)[1].lower() in CURSOR_EXTS
+
+def parse_drop_files(data):
+    """Split a TkDND '<<Drop>>' file list (Tcl list: {braced} or bare paths)
+    into a plain list of paths."""
+    out = []
+    for braced, bare in re.findall(r"\{([^}]*)\}|(\S+)", data):
+        p = (braced or bare).strip()
+        if p:
+            out.append(p)
+    return out
+
 # ------------------------------------------------------------ theme assembly ---
 def _main_cursor(nm):
     n = nm.lower()

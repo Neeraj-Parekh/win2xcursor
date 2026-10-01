@@ -41,7 +41,7 @@ python3 batch_convert.py --src ~/Downloads/cursors --out ~/.icons
 python3 batch_convert.py --src ~/Downloads/cursors --list   # just preview the names first
 ```
 
-Or skip the terminal: `python3 gui.py` lists installed themes, shows a preview, applies with one click, and converts new packs with options for the fallback theme, recoloring, and strength.
+Or skip the terminal: `python3 gui.py` lists installed themes, shows a preview, applies with one click, and converts new packs with options for the fallback theme, recoloring, and strength. You can also drag and drop `.zip` / `.cur` / `.ani` files (or a folder) straight onto the window — needs the optional `tkinterdnd2` package (`pip install tkinterdnd2`), otherwise the Convert button does the same job.
 
 Optional tint, if you want the whole set pushed toward a color:
 

@@ -15,6 +15,12 @@ import tkinter as tk
 import zipfile
 from tkinter import colorchooser, filedialog, messagebox, simpledialog
 
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    HAS_DND = True
+except ImportError:  # drag & drop is optional; file picker always works
+    HAS_DND = False
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import cursor_converter as C
@@ -184,6 +190,11 @@ class App:
         self.prog = tk.Label(root, textvariable=self.status_var, bg="#24273a", fg="#8aadf4")
         self.prog.pack(pady=(0, 10))
 
+        if HAS_DND:
+            root.drop_target_register(DND_FILES)
+            root.dnd_bind("<<Drop>>", self.on_drop)
+            self.status_var.set("Pick a theme, convert a pack, or drag & drop files here.")
+
         self.refresh_list()
 
     # -- theme list -----------------------------------------------------
@@ -260,7 +271,20 @@ class App:
             title="Choose cursor file(s)", filetypes=[("Cursor packs", "*.zip *.cur *.ani"), ("All", "*")])
         if not paths:
             return
-        name = simpledialog.askstring("Theme name", "Name for the new theme:", initialvalue="My-New-Cursor")
+        self.start_convert(list(paths))
+
+    def on_drop(self, event):
+        """Handle files dropped anywhere on the window (needs tkinterdnd2)."""
+        paths = [p for p in C.parse_drop_files(event.data) if C.is_cursor_source(p)]
+        if not paths:
+            messagebox.showinfo("win2xcursor", "Drop .zip / .cur / .ani files (or a folder of them).")
+            return
+        self.root.lift()
+        self.start_convert(paths)
+
+    def start_convert(self, paths):
+        default = C.sanitize(os.path.splitext(os.path.basename(paths[0]))[0])
+        name = simpledialog.askstring("Theme name", "Name for the new theme:", initialvalue=default)
         if not name:
             messagebox.showinfo("win2xcursor", "Conversion cancelled.")
             return
@@ -316,6 +340,6 @@ class App:
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
     App(root)
     root.mainloop()
