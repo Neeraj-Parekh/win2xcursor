@@ -1,73 +1,72 @@
 # win2xcursor
 
-Convert Windows cursor packs (`.ani` / `.cur` / `.zip`) into Linux **XCursor** themes — with a tiny Tkinter GUI. No heavy dependencies.
+![ci](https://github.com/Neeraj-Parekh/win2xcursor/actions/workflows/ci.yml/badge.svg)
 
-Tested on Ubuntu/GNOME. Converts animated `.ani` cursors frame-by-frame (RIFF/ACON, incl. old DIB `BITMAPINFOHEADER` frames and `rate`/`seq` timing), maps Windows role names to X11 roles (`left_ptr`, `hand2`, `watch`, `text`, resize arrows, …), splits multi-variant zips (dark/light, Static/Windows) into separate themes, and writes symlinks for legacy X11 alias names.
+I kept downloading nice Windows cursor packs and finding nothing on Linux that would convert them properly — the tools I tried either dropped the animation, messed up the colors, or mapped every cursor to the same arrow. So I wrote my own. It takes `.ani` / `.cur` / `.zip` packs and turns them into real XCursor themes, animation and all.
 
-## Install
+![win2xcursor GUI](screenshot.png)
+
+## What you need
+
+- Python 3 (3.10+ is fine)
+- Pillow: `pip install -r requirements.txt` (or `sudo apt install python3-pil`)
+- For the GUI: tkinter (`sudo apt install python3-tk`). If `python3` on your machine points at a venv without tkinter, run the GUI with your system python instead, e.g. `/usr/bin/python3 gui.py`.
+
+No other dependencies. That's deliberate.
+
+## Using it
+
+Single pack, straight to your cursor folder, applied right away:
 
 ```bash
-sudo apt install python3-tk python3-pil   # or: pip install -r requirements.txt
-git clone https://github.com/Neeraj-Parekh/win2xcursor.git
-cd win2xcursor
+python3 cursor_converter.py "My Cursor.zip" --theme My-Cursor --install --apply
 ```
 
-Only hard dependency is [Pillow](https://python-pillow.org/).
-
-## CLI usage
+A single animated cursor file:
 
 ```bash
-# single pack -> ~/.icons/My-Theme (+ install + apply)
-python3 cursor_converter.py "My Cursor.zip" --theme My-Theme --install --apply
-
-# single .ani / .cur file
 python3 cursor_converter.py pointer.ani --theme My-Pointer --install
-
-# folder of cursors
-python3 cursor_converter.py ./my-cursors --theme My-Theme --out ~/.icons
-
-# optional recolor blend toward R,G,B
-python3 cursor_converter.py "pack.zip" --theme My-Red --recolor 200,60,120 --strength 0.5
 ```
 
-## Batch convert
+A folder full of `.cur` / `.ani` files:
+
+```bash
+python3 cursor_converter.py ./my-cursors --theme My-Theme --out ~/.icons
+```
+
+Want everything in your downloads folder converted at once:
 
 ```bash
 python3 batch_convert.py --src ~/Downloads/cursors --out ~/.icons
-python3 batch_convert.py --src ~/Downloads/cursors --list   # preview only
+python3 batch_convert.py --src ~/Downloads/cursors --list   # just preview the names first
 ```
 
-## Light GUI
+Or skip the terminal: `python3 gui.py` lists installed themes, shows a preview, applies with one click, and converts new packs with options for the fallback theme, recoloring, and strength.
+
+Optional tint, if you want the whole set pushed toward a color:
 
 ```bash
-python3 gui.py
+python3 cursor_converter.py "pack.zip" --theme My-Red --recolor 200,60,120 --strength 0.5
 ```
 
-List installed themes, **Apply** one, **Convert new cursor…** from a `.zip`/`.cur`/`.ani`, or revert to `Vimix-cursors`. That's it — plain Tkinter, no Electron, no browser.
+After applying, log out and back in (or restart apps) — GNOME caches cursors per app, so some windows pick it up late.
 
-## How it works
+## What's actually happening
 
-| Step | What happens |
-|---|---|
-| `parse_ani` | RIFF/ACON chunks → per-frame ICONDIR blobs, honors `rate` (jiffies→ms) and `seq` order |
-| `dib_to_rgba` | fallback decoder for pre-PNG DIB cursors + 1-bit AND transparency mask |
-| `to_xcursor_bytes` | RGBA → XCursor BGRA byte order (little-endian ARGB32) |
-| `role_for` | Windows file names → X11 roles (`busy`→`watch`, `link`→`hand2`, diagonal resize→`size_fdiag`/`size_bdiag`, …) |
-| `write_theme` | writes `cursors/*` + `index.theme`, symlinks legacy aliases (`arrow`, `ibeam`, `wait`, …) |
-| `apply_theme` | `gsettings` + GTK `settings.ini` + `~/.profile` `XCURSOR_THEME` |
+- `.ani` files are RIFF/ACON containers. The script reads the `fram` chunks, keeps the `rate` timing (converted from jiffies to ms) and `seq` ordering, so the Linux version animates the same way.
+- Some old packs store frames as BMP DIBs instead of PNGs. Those get decoded by hand, including the 1-bit transparency mask, because Pillow can't open them.
+- XCursor pixels on little-endian machines are B,G,R,A. Writing them in RGBA order gives you a lovely orange tint on everything — been there, fixed that, there's a test pinning it now.
+- File names get mapped to X11 roles (`busy` → `watch`, `link` → `hand2`, diagonal resizes → `size_fdiag`/`size_bdiag`, …), multi-variant zips (dark/light, Static/Windows) become separate themes, and legacy alias names get symlinks.
+- Anything the pack doesn't cover falls back to the theme you pick with `--inherit` (default `Vimix-cursors`), so you never end up with an invisible cursor.
 
-Native Linux packs (a `linux/` subfolder with `index.theme` + `cursors/`) don't need conversion — copy them straight into `~/.icons`.
+If a pack already ships a `linux/` folder with `index.theme` + `cursors/`, don't convert it — copy it into `~/.icons` as is.
 
-## Files
+## Honest limitations
 
-| File | Purpose |
-|---|---|
-| `cursor_converter.py` | core converter + CLI (importable as `cursor_converter`) |
-| `gui.py` | lightweight Tkinter GUI |
-| `batch_convert.py` | batch-convert a folder of packs |
-| `requirements.txt` | `Pillow` |
+- Developed and tested on Ubuntu + GNOME. KDE and other desktops will probably work (it's just XCursor files) but I haven't verified `apply` there — installing and selecting via your settings app will still work.
+- Big packs (looking at you, 18 MB Pando) take a minute or two to convert. The GUI runs it in the background so it won't freeze.
+- Run the test suite with `python3 -m unittest discover -s tests -v`.
 
-## Notes
+## Contributing
 
-- Output goes to `~/.icons/<Theme-Name>/` by default with `Inherits=Vimix-cursors` for missing roles.
-- Re-login (or restart apps) after applying — GNOME caches cursors per app.
+Bug reports with the actual pack attached are gold — see [CONTRIBUTING.md](CONTRIBUTING.md). PRs welcome, just keep it dependency-free and add a test.

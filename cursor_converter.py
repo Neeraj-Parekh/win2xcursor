@@ -12,7 +12,9 @@ Examples:
 import os, re, sys, struct, zipfile, io, argparse
 from PIL import Image
 
+__version__ = "1.1.0"
 DEFAULT_INHERIT = "Vimix-cursors"
+DEFAULT_OUT = os.path.expanduser("~/.icons")
 def u32(d, o): return struct.unpack_from("<I", d, o)[0]
 
 # ---------------------------------------------------------------- decoding ---
@@ -432,12 +434,19 @@ def convert_input(path, theme_name=None, out_dir=None, inherit=DEFAULT_INHERIT, 
         base = os.path.basename(os.path.abspath(path.rstrip("/")))
         default_name = theme_name or sanitize(base)
     else:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"input not found: {path}")
         items = [path]
         default_name = theme_name or sanitize(os.path.splitext(os.path.basename(path))[0])
     built = 0
     for item in items:
         if re.search(r"\.zip$", item, re.I):
-            with zipfile.ZipFile(item) as z:
+            try:
+                zf = zipfile.ZipFile(item)
+            except zipfile.BadZipFile:
+                print(f"!! skipping corrupt zip: {item}")
+                continue
+            with zf as z:
                 groups = _zip_variants(z)
                 multi = len(groups) > 1
                 for sub, ents in groups.items():
@@ -471,8 +480,15 @@ def convert_input(path, theme_name=None, out_dir=None, inherit=DEFAULT_INHERIT, 
                     built += 1
         else:
             nm = os.path.splitext(os.path.basename(item))[0]
-            got = cursors_from_single(open(item, "rb").read(), nm, tint, strength)
+            try:
+                with open(item, "rb") as f:
+                    raw = f.read()
+            except OSError as e:
+                print(f"!! cannot read {item}: {e}")
+                continue
+            got = cursors_from_single(raw, nm, tint, strength)
             if not got:
+                print(f"!! no cursor frames in {item}")
                 continue
             xc, _ = got
             all_roles = {role_for(nm): (xc, 1, _main_cursor(nm))}
@@ -492,8 +508,12 @@ def install_theme(tdir):
     return dst
 
 def apply_theme(theme):
+    import shutil
     import subprocess
-    subprocess.run(["gsettings", "set", "org.gnome.desktop.interface", "cursor-theme", theme])
+    if shutil.which("gsettings"):
+        subprocess.run(["gsettings", "set", "org.gnome.desktop.interface", "cursor-theme", theme])
+    else:
+        print("note: gsettings not found, skipping GNOME setting (theme still installed)")
     for f in ("~/.config/gtk-3.0/settings.ini", "~/.config/gtk-4.0/settings.ini"):
         p = os.path.expanduser(f)
         if os.path.exists(p):
@@ -509,23 +529,45 @@ def apply_theme(theme):
         open(prof, "w").write(t)
     print(f"applied: {theme} (re-login / restart apps to see it)")
 
+
+def parse_recolor(spec):
+    """Parse 'R,G,B' into an (r, g, b) tuple or raise ValueError with a clear message."""
+    try:
+        parts = [int(x) for x in spec.replace(";", ",").split(",")[:3]]
+    except ValueError:
+        raise ValueError(f'bad --recolor {spec!r}: expected "R,G,B" like "200,60,120"')
+    if len(parts) != 3 or not all(0 <= v <= 255 for v in parts):
+        raise ValueError(f'bad --recolor {spec!r}: expected "R,G,B" like "200,60,120"')
+    return tuple(parts)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Convert Windows cursors to Linux XCursor themes")
-    ap.add_argument("input")
-    ap.add_argument("--theme", default=None)
-    ap.add_argument("--out", default=os.path.expanduser("~/.icons"))
-    ap.add_argument("--inherit", default=DEFAULT_INHERIT)
+    ap.add_argument("input", help=".ani/.cur file, .zip pack, or folder of cursors")
+    ap.add_argument("--theme", default=None, help="theme name (default: file/folder name)")
+    ap.add_argument("--out", default=DEFAULT_OUT, help="output icon dir (default ~/.icons)")
+    ap.add_argument("--inherit", default=DEFAULT_INHERIT,
+                    help=f"fallback theme for missing roles (default {DEFAULT_INHERIT})")
     ap.add_argument("--install", action="store_true", help="copy into ~/.icons")
     ap.add_argument("--apply", action="store_true", help="also set as active cursor theme")
     ap.add_argument("--recolor", default=None, help='blend all colors toward R,G,B e.g. "255,0,0"', type=str)
     ap.add_argument("--strength", default=0.5, type=float, help="recolor strength 0-1 (default 0.5)")
+    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     a = ap.parse_args()
-    tint = tuple(int(x) for x in a.recolor.split(",")) if a.recolor else None
+    try:
+        tint = parse_recolor(a.recolor) if a.recolor else None
+    except ValueError as e:
+        ap.error(str(e))
+    if not 0 <= a.strength <= 1:
+        ap.error("--strength must be between 0 and 1")
     if tint is not None and a.strength <= 0:
         tint, a.strength = None, 0.0
     if tint is not None:
         print(f"recoloring toward {tint} at {a.strength:.0%}")
-    themes = convert_input(a.input, a.theme, a.out, a.inherit, tint, a.strength)
+    try:
+        themes = convert_input(a.input, a.theme, a.out, a.inherit, tint, a.strength)
+    except FileNotFoundError as e:
+        ap.error(str(e))
     if not themes:
         sys.exit("no cursor files found / converted")
     for tname, tdir in themes.items():
