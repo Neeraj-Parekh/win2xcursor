@@ -2,7 +2,7 @@
 """
 win2xcursor / cursor_converter.py - Convert Windows cursor packs to Linux XCursor themes.
 Accepts: a .cur/.ani file, a .zip of cursor files, or a folder.
-Output: a ready-to-use XCursor theme (inherits Vimix-cursors by default).
+Output: a ready-to-use XCursor theme (inherits Adwaita by default).
 Options: --install (copy into ~/.icons), --apply (make it active).
 
 Examples:
@@ -12,9 +12,10 @@ Examples:
 import os, re, sys, struct, zipfile, io, argparse
 from PIL import Image
 
-__version__ = "1.1.0"
-DEFAULT_INHERIT = "Vimix-cursors"
-DEFAULT_OUT = os.path.expanduser("~/.icons")
+__version__ = "1.2.0"
+# Xcursor(3) search order: ~/.local/share/icons first, ~/.icons for compat.
+DEFAULT_INHERIT = "Adwaita"  # guaranteed present on GNOME; override with --inherit
+DEFAULT_OUT = os.path.expanduser("~/.local/share/icons")
 def u32(d, o): return struct.unpack_from("<I", d, o)[0]
 
 # ---------------------------------------------------------------- decoding ---
@@ -368,17 +369,22 @@ def role_for(name):
     return "left_ptr"
 
 ALIASES = {
-    "crossed_circle": ["not-allowed", "forbidden", "no_drop", "dnd-no-drop"],
-    "left_ptr": ["arrow", "default"],
-    "hand2": ["hand1", "link", "pointer"],
+    "crossed_circle": ["not-allowed", "forbidden", "no_drop", "no-drop", "dnd-no-drop"],
+    "left_ptr": ["arrow", "default", "top_left_arrow", "ul_angle", "ur_angle", "X_cursor"],
+    "hand2": ["hand1", "hand", "link", "pointer"],
     "fleur": ["pointer_move", "move", "4498f0e0c1937ffe01fd06f973665830"],
     "xterm": ["text"],
-    "text": ["ibeam"],
-    "crosshair": ["cross", "tcross"],
-    "size_fdiag": ["fd_double_arrow", "nwse-resize", "nw-resize", "se-resize", "resize-corner-2"],
-    "size_bdiag": ["bd_double_arrow", "nesw-resize", "ne-resize", "sw-resize", "resize-corner-1"],
-    "sb_h_double_arrow": ["h_double_arrow", "col-resize", "e-resize", "w-resize", "ew-resize"],
-    "sb_v_double_arrow": ["v_double_arrow", "row-resize", "n-resize", "s-resize", "ns-resize"],
+    "text": ["ibeam", "xterm"],
+    "crosshair": ["cross", "tcross", "plus", "cross_reverse", "diamond_cross"],
+    "size_fdiag": ["fd_double_arrow", "nwse-resize", "nw-resize", "se-resize",
+                   "top_left_corner", "bottom_right_corner", "resize-corner-2"],
+    "size_bdiag": ["bd_double_arrow", "nesw-resize", "ne-resize", "sw-resize",
+                   "top_right_corner", "bottom_left_corner", "resize-corner-1"],
+    "sb_h_double_arrow": ["h_double_arrow", "col-resize", "e-resize", "w-resize",
+                          "ew-resize", "left_side", "right_side"],
+    "sb_v_double_arrow": ["v_double_arrow", "row-resize", "n-resize", "s-resize",
+                          "ns-resize", "top_side", "bottom_side"],
+    "help": ["question_arrow"],
     "wait": ["watch"],
     "left_ptr_watch": ["08e8e1c95fe2fc01f976f1e063a24c0d",
                        "progress", "app_starting"],
@@ -386,7 +392,7 @@ ALIASES = {
     "hand1": ["e29285e29e6d1d1d310ec8a0f3ee52"],
     "fleur": ["4498f0e0c1937ffe01fd06f973665830", "move"],
     "pencil": ["028006030e0e7ebffc7f707070c6d0c2", "handwriting"],
-    "size_all": ["all-scroll"],
+    "size_all": ["all-scroll", "all-resize"],
     "cell": ["crosshair-cell"],
     "zoom_in": ["zoom-in", "zoomin"],
     "zoom_out": ["zoom-out", "zoomout"],
@@ -538,8 +544,8 @@ def convert_input(path, theme_name=None, out_dir=None, inherit=DEFAULT_INHERIT, 
             theme_map[default_name] = tdir
     return theme_map
 
-def install_theme(tdir):
-    dst = os.path.join(os.path.expanduser("~/.icons"), os.path.basename(tdir))
+def install_theme(tdir, dest_base=None):
+    dst = os.path.join(os.path.expanduser(dest_base or DEFAULT_OUT), os.path.basename(tdir))
     if os.path.abspath(tdir) == os.path.abspath(dst):
         return dst
     import shutil
@@ -567,6 +573,11 @@ def apply_theme(theme):
         t = re.sub(r"^export XCURSOR_THEME=.*$", f"export XCURSOR_THEME={theme}", t, flags=re.M)
         if "XCURSOR_THEME=" not in t:
             t += f"\nexport XCURSOR_THEME={theme}\n"
+        # Wayland compositors read themes through libXcursor: the user icon
+        # dir must be on XCURSOR_PATH (ArchWiki cursor-themes note).
+        want_path = "$HOME/.local/share/icons:/usr/share/icons"
+        if "XCURSOR_PATH=" not in t:
+            t += f"\nexport XCURSOR_PATH={want_path}:$XCURSOR_PATH\n"
         open(prof, "w").write(t)
     print(f"applied: {theme} (re-login / restart apps to see it)")
 
@@ -586,10 +597,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Convert Windows cursors to Linux XCursor themes")
     ap.add_argument("input", help=".ani/.cur file, .zip pack, or folder of cursors")
     ap.add_argument("--theme", default=None, help="theme name (default: file/folder name)")
-    ap.add_argument("--out", default=DEFAULT_OUT, help="output icon dir (default ~/.icons)")
+    ap.add_argument("--out", default=DEFAULT_OUT, help="output icon dir (default ~/.local/share/icons)")
     ap.add_argument("--inherit", default=DEFAULT_INHERIT,
                     help=f"fallback theme for missing roles (default {DEFAULT_INHERIT})")
-    ap.add_argument("--install", action="store_true", help="copy into ~/.icons")
+    ap.add_argument("--install", action="store_true", help="copy into the output icon dir")
     ap.add_argument("--apply", action="store_true", help="also set as active cursor theme")
     ap.add_argument("--recolor", default=None, help='blend all colors toward R,G,B e.g. "255,0,0"', type=str)
     ap.add_argument("--strength", default=0.5, type=float, help="recolor strength 0-1 (default 0.5)")

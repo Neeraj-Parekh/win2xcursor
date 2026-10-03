@@ -33,11 +33,11 @@ except Exception:  # Pillow without tkinter support -> previews off, rest works
     ImageTk = None
     HAS_IMAGETK = False
 
-SEARCH = [os.path.expanduser("~/.icons"),
-          os.path.expanduser("~/.local/share/icons"),
+SEARCH = [os.path.expanduser("~/.local/share/icons"),
+          os.path.expanduser("~/.icons"),
           "/usr/share/icons"]
 PREVIEW_ROLES = ["left_ptr", "hand2", "text", "watch"]
-OUT_DIR = os.path.expanduser("~/.icons")
+OUT_DIR = os.path.expanduser("~/.local/share/icons")
 
 
 def installed_themes():
@@ -182,7 +182,7 @@ class App:
         btns.pack(pady=8)
         for txt, cmd in [("Apply theme", self.apply_selected),
                          ("Convert new cursor…", self.convert_new),
-                         ("Revert to Vimix", self.revert),
+                         ("Revert to Adwaita", self.revert),
                          ("Refresh", self.refresh_list)]:
             tk.Button(btns, text=txt, command=cmd, bg="#8aadf5", fg="#24273a",
                       activebackground="#7dc4e4", padx=10, pady=4, relief="flat").pack(side="left", padx=5)
@@ -253,9 +253,9 @@ class App:
         messagebox.showinfo("win2xcursor", f"Applied: {name}\n\nRe-login (or restart apps) to see it everywhere.")
 
     def revert(self):
-        C.apply_theme("Vimix-cursors")
+        C.apply_theme("Adwaita")
         self.refresh_list()
-        messagebox.showinfo("win2xcursor", "Switched back to Vimix-cursors.")
+        messagebox.showinfo("win2xcursor", "Switched back to Adwaita (system default).")
 
     def pick_color(self):
         rgb, _hex = colorchooser.askcolor(title="Blend cursors toward…")

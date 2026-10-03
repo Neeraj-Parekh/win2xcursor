@@ -31,13 +31,13 @@ python3 cursor_converter.py pointer.ani --theme My-Pointer --install
 A folder full of `.cur` / `.ani` files:
 
 ```bash
-python3 cursor_converter.py ./my-cursors --theme My-Theme --out ~/.icons
+python3 cursor_converter.py ./my-cursors --theme My-Theme --out ~/.local/share/icons
 ```
 
 Want everything in your downloads folder converted at once:
 
 ```bash
-python3 batch_convert.py --src ~/Downloads/cursors --out ~/.icons
+python3 batch_convert.py --src ~/Downloads/cursors --out ~/.local/share/icons
 python3 batch_convert.py --src ~/Downloads/cursors --list   # just preview the names first
 ```
 
@@ -51,15 +51,19 @@ python3 cursor_converter.py "pack.zip" --theme My-Red --recolor 200,60,120 --str
 
 After applying, log out and back in (or restart apps) — GNOME caches cursors per app, so some windows pick it up late.
 
+On Wayland, `--apply` also adds `~/.local/share/icons` to `XCURSOR_PATH` in
+your `~/.profile` (libXcursor requirement — themes there are invisible to
+Wayland clients without it). Open a fresh login shell afterwards.
+
 ## What's actually happening
 
 - `.ani` files are RIFF/ACON containers. The script reads the `fram` chunks, keeps the `rate` timing (converted from jiffies to ms) and `seq` ordering, so the Linux version animates the same way.
 - Some old packs store frames as BMP DIBs instead of PNGs. Those get decoded by hand, including the 1-bit transparency mask, because Pillow can't open them.
 - XCursor pixels on little-endian machines are B,G,R,A. Writing them in RGBA order gives you a lovely orange tint on everything — been there, fixed that, there's a test pinning it now.
 - File names get mapped to X11 roles (`busy` → `watch`, `link` → `hand2`, diagonal resizes → `size_fdiag`/`size_bdiag`, …), multi-variant zips (dark/light, Static/Windows) become separate themes, and legacy alias names get symlinks.
-- Anything the pack doesn't cover falls back to the theme you pick with `--inherit` (default `Vimix-cursors`), so you never end up with an invisible cursor.
+- Anything the pack doesn't cover falls back to the theme you pick with `--inherit` (default `Adwaita`, always present on GNOME), so you never end up with an invisible cursor.
 
-If a pack already ships a `linux/` folder with `index.theme` + `cursors/`, don't convert it — copy it into `~/.icons` as is.
+If a pack already ships a `linux/` folder with `index.theme` + `cursors/`, don't convert it — copy it into `~/.local/share/icons` as is.
 
 ## Honest limitations
 

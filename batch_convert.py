@@ -2,8 +2,8 @@
 """Batch-convert Windows cursor packs into Linux XCursor themes.
 
 Run:
-  python3 batch_convert.py --src ~/Downloads/cursors --out ~/.icons
-  python3 batch_convert.py --src /path/to/zips --out ~/.icons --inherit Vimix-cursors
+  python3 batch_convert.py --src ~/Downloads/cursors --out ~/.local/share/icons
+  python3 batch_convert.py --src /path/to/zips --out ~/.local/share/icons --inherit Adwaita
 
 Any *.zip / *.cur / *.ani found directly under --src is converted.
 Theme name defaults to the sanitized file name; use --list to preview.
@@ -24,8 +24,8 @@ def main():
     ap = argparse.ArgumentParser(description="Batch convert cursor packs to XCursor themes")
     ap.add_argument("--src", default=os.path.expanduser("~/Downloads/cursors"),
                     help="directory containing .zip/.cur/.ani packs")
-    ap.add_argument("--out", default=os.path.expanduser("~/.icons"),
-                    help="output icon directory (default ~/.icons)")
+    ap.add_argument("--out", default=os.path.expanduser("~/.local/share/icons"),
+                    help="output icon directory (default ~/.local/share/icons)")
     ap.add_argument("--inherit", default=C.DEFAULT_INHERIT,
                     help="fallback theme for missing roles")
     ap.add_argument("--list", action="store_true",

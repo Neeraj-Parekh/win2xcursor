@@ -133,14 +133,76 @@ class TestThemeAssembly(unittest.TestCase):
         xc = C.xcur_from_frames(frames)
         with tempfile.TemporaryDirectory() as tmp:
             tdir = os.path.join(tmp, "My-Theme")
-            C.write_theme({"left_ptr": (xc, 1, 0)}, tdir, "My-Theme", "Vimix-cursors")
+            C.write_theme({"left_ptr": (xc, 1, 0)}, tdir, "My-Theme", "Adwaita")
             self.assertTrue(os.path.isfile(os.path.join(tdir, "cursors", "left_ptr")))
             with open(os.path.join(tdir, "index.theme")) as f:
                 content = f.read()
             self.assertIn("Name=My-Theme", content)
-            self.assertIn("Inherits=Vimix-cursors", content)
+            self.assertIn("Inherits=Adwaita", content)
             if hasattr(os, "symlink"):
                 self.assertTrue(os.path.exists(os.path.join(tdir, "cursors", "arrow")))
+
+
+class TestSpecCompliance(unittest.TestCase):
+    # Names from Xcursor(3)/Adwaita reference + ArchWiki troubleshooting:
+    # every one must resolve to a real file via roles or ALIASES links.
+    LEGACY_NAMES = ["top_left_arrow", "ul_angle", "ur_angle", "X_cursor",
+                    "hand", "xterm", "ibeam", "plus", "cross_reverse",
+                    "diamond_cross", "question_arrow", "all-resize", "no-drop",
+                    "top_side", "bottom_side", "left_side", "right_side",
+                    "top_left_corner", "top_right_corner",
+                    "bottom_left_corner", "bottom_right_corner",
+                    "ew-resize", "ns-resize", "ne-resize", "nw-resize",
+                    "se-resize", "sw-resize"]
+
+    def test_legacy_names_all_aliased(self):
+        flat = set()
+        for role, targets in C.ALIASES.items():
+            flat.add(role)
+            flat.update(targets)
+        for name in self.LEGACY_NAMES:
+            with self.subTest(name=name):
+                self.assertIn(name, flat, f"{name} has no role or alias mapping")
+
+    def test_aliases_land_on_disk(self):
+        frames = C.static_frames(make_cur(make_png()), "arrow")
+        xc = C.xcur_from_frames(frames)
+        roles = {"left_ptr": (xc, 1, 0), "hand2": (xc, 1, 0),
+                 "text": (xc, 1, 0), "crosshair": (xc, 1, 0),
+                 "help": (xc, 1, 0), "size_all": (xc, 1, 0),
+                 "sb_h_double_arrow": (xc, 1, 0),
+                 "sb_v_double_arrow": (xc, 1, 0),
+                 "size_fdiag": (xc, 1, 0), "size_bdiag": (xc, 1, 0),
+                 "crossed_circle": (xc, 1, 0)}
+        with tempfile.TemporaryDirectory() as tmp:
+            tdir = os.path.join(tmp, "T")
+            C.write_theme(roles, tdir, "T", "Adwaita")
+            cdir = os.path.join(tdir, "cursors")
+            for name in self.LEGACY_NAMES:
+                with self.subTest(name=name):
+                    self.assertTrue(os.path.exists(os.path.join(cdir, name)),
+                                    f"{name} missing from built theme")
+
+    def test_multisize_ladder(self):
+        frames = C.static_frames(make_cur(make_png(128, 128)), "arrow")
+        xc = C.xcur_from_frames(frames)
+        import struct as _st
+        n = _st.unpack("<I", xc[12:16])[0]
+        sizes = set()
+        for i in range(n):
+            _t, _s, pos = _st.unpack_from("<III", xc, 16 + 12 * i)
+            _h, _ty, _su, _v, w, h2, _xh, _yh, _d = _st.unpack_from("<9I", xc, pos)
+            sizes.add((w, h2))
+        for s in (24, 32, 48, 64, 96, 128):
+            self.assertIn((s, s), sizes, f"size {s} missing from ladder")
+
+    def test_install_theme_uses_default_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "Theme")
+            os.makedirs(os.path.join(src, "cursors"))
+            open(os.path.join(src, "cursors", "left_ptr"), "wb").write(b"Xcur")
+            got = C.install_theme(src, dest_base=tmp)
+            self.assertTrue(os.path.isfile(os.path.join(got, "cursors", "left_ptr")))
 
 
 if __name__ == "__main__":
