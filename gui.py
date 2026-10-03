@@ -43,9 +43,11 @@ OUT_DIR = os.path.expanduser("~/.local/share/icons")
 def installed_themes():
     themes = {}
     for base in SEARCH:
-        if not os.path.isdir(base):
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
             continue
-        for name in sorted(os.listdir(base)):
+        for name in names:
             d = os.path.join(base, name)
             if os.path.isdir(os.path.join(d, "cursors")) and os.path.exists(os.path.join(d, "index.theme")):
                 themes.setdefault(name, d)
@@ -66,7 +68,7 @@ def inherited_from(path):
 def current_theme():
     try:
         out = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "cursor-theme"],
-                             capture_output=True, text=True, timeout=5).stdout.strip().strip("'")
+                             capture_output=True, text=True, timeout=5).stdout.strip().strip("'\"")
         return out or "?"
     except Exception:
         return "?"
@@ -88,19 +90,23 @@ def xcur_first_frame(path, size=40, _depth=0):
             target = data.decode("ascii").strip().split("\x00")[0]
         except (UnicodeDecodeError, ValueError):
             return None
-        if (not target or "/" in target or "\\" in target
+        if (not target or target in (".", "..") or "/" in target or "\\" in target
                 or len(target) > 64 or _depth >= 4):
             return None
         return xcur_first_frame(os.path.join(os.path.dirname(path), target), size, _depth + 1)
+    if len(data) < 16:
+        return None
     try:
         ntoc, = struct.unpack_from("<I", data, 12)
+        if ntoc == 0 or ntoc > 256 or 16 + 12 * ntoc > len(data):
+            return None
         pos = None
         for i in range(ntoc):
             _type, _sub, p = struct.unpack_from("<III", data, 16 + 12 * i)
             if _type == 0xFFFD0002:
                 pos = p
                 break
-        if pos is None:
+        if pos is None or pos < 16 + 12 * ntoc or pos + 36 > len(data):
             return None
         (_h, _t, _s, _v, w, h, _xh, _yh, _d) = struct.unpack_from("<9I", data, pos)
         if w <= 0 or h <= 0 or w > 512 or h > 512:
@@ -199,6 +205,7 @@ class App:
 
     # -- theme list -----------------------------------------------------
     def refresh_list(self):
+        keep = self.selected_name()
         self.themes = installed_themes()
         cur = current_theme()
         self.list.delete(0, "end")
@@ -206,8 +213,9 @@ class App:
         for name in names:
             mark = "  ◉" if name == cur else ""
             self.list.insert("end", name + mark)
-        if cur in names:  # pre-select the active theme so preview/info isn't empty
-            idx = names.index(cur)
+        target = keep if keep in names else (cur if cur in names else None)
+        if target is not None:  # keep selection across refreshes
+            idx = names.index(target)
             self.list.selection_set(idx)
             self.list.see(idx)
             self.show_info(None)
@@ -216,7 +224,8 @@ class App:
         sel = self.list.curselection()
         if not sel:
             return None
-        return self.list.get(sel[0]).replace("  ◉", "")
+        text = self.list.get(sel[0])
+        return text[:-len("  ◉")] if text.endswith("  ◉") else text
 
     def show_info(self, _):
         name = self.selected_name()
@@ -233,6 +242,7 @@ class App:
 
     def show_preview(self, path):
         cdir = os.path.join(path, "cursors") if path else ""
+        self.photos.clear()
         for lab, role in zip(self.prev_imgs, PREVIEW_ROLES):
             im = xcur_first_frame(os.path.join(cdir, role)) if cdir else None
             if im is not None and HAS_IMAGETK:
@@ -248,17 +258,27 @@ class App:
         if not name:
             messagebox.showinfo("win2xcursor", "Pick a theme first.")
             return
-        C.apply_theme(name)
+        try:
+            C.apply_theme(name)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("win2xcursor", f"Could not apply:\n{e}")
+            return
         self.refresh_list()
         messagebox.showinfo("win2xcursor", f"Applied: {name}\n\nRe-login (or restart apps) to see it everywhere.")
 
     def revert(self):
-        C.apply_theme("Adwaita")
+        try:
+            C.apply_theme("Adwaita")
+        except (OSError, ValueError) as e:
+            messagebox.showerror("win2xcursor", f"Could not revert:\n{e}")
+            return
         self.refresh_list()
         messagebox.showinfo("win2xcursor", "Switched back to Adwaita (system default).")
 
     def pick_color(self):
         rgb, _hex = colorchooser.askcolor(title="Blend cursors toward…")
+        if rgb is None:  # cancelled: keep the previous choice
+            return
         if rgb:
             self.tint = tuple(int(v) for v in rgb)
             self.color_var.set(f"rgb{self.tint}")
@@ -275,7 +295,8 @@ class App:
 
     def on_drop(self, event):
         """Handle files dropped anywhere on the window (needs tkinterdnd2)."""
-        paths = [p for p in C.parse_drop_files(event.data) if C.is_cursor_source(p)]
+        paths = [p for p in C.parse_drop_files(event.data)
+                 if os.path.exists(p) and C.is_cursor_source(p)]
         if not paths:
             messagebox.showinfo("win2xcursor", "Drop .zip / .cur / .ani files (or a folder of them).")
             return
@@ -283,36 +304,50 @@ class App:
         self.start_convert(paths)
 
     def start_convert(self, paths):
+        if getattr(self, "_job_active", False):
+            messagebox.showinfo("win2xcursor", "A conversion is already running.")
+            return
         default = C.sanitize(os.path.splitext(os.path.basename(paths[0]))[0])
-        name = simpledialog.askstring("Theme name", "Name for the new theme:", initialvalue=default)
-        if not name:
+        raw_name = simpledialog.askstring("Theme name", "Name for the new theme:", initialvalue=default)
+        if raw_name is None or not raw_name.strip():
             messagebox.showinfo("win2xcursor", "Conversion cancelled.")
             return
+        name = C.sanitize(raw_name.strip())
+        try:
+            strength = float(self.strength.get())
+        except (tk.TclError, ValueError, TypeError):
+            messagebox.showerror("win2xcursor", "Bad strength value; must be a number 0-1.")
+            return
+        inherit = self.inherit_var.get().strip() or C.DEFAULT_INHERIT
+        if inherit not in self.themes:
+            messagebox.showwarning("win2xcursor",
+                f"Fallback theme {inherit!r} is not installed; missing roles will fall back to Adwaita instead.")
+        self._job_active = True
         self.status_var.set(f"Converting {len(paths)} file(s) → {name} …")
         self.root.update_idletasks()
         t = threading.Thread(target=self._convert_bg,
-                             args=(list(paths), name, self.inherit_var.get().strip() or C.DEFAULT_INHERIT,
-                                   self.tint, float(self.strength.get())),
+                             args=(list(paths), name, inherit,
+                                   self.tint, strength),
                              daemon=True)
         t.start()
         self.root.after(150, self._poll_job)
 
     def _convert_bg(self, paths, name, inherit, tint, strength):
         tdirs = {}
+        errors = []
         try:
             for p in paths:
                 try:
                     t = C.convert_input(p, theme_name=name, out_dir=OUT_DIR,
                                         inherit=inherit, tint=tint,
                                         strength=strength if tint else 0.0)
-                except (FileNotFoundError, zipfile.BadZipFile, OSError) as e:
-                    self.job_q.put(("error", f"{os.path.basename(p)}: {e}"))
-                    return
+                except Exception as e:  # keep the batch going; report at the end
+                    errors.append(f"{os.path.basename(p)}: {type(e).__name__}: {e}")
+                    continue
                 tdirs.update(t)
         except Exception as e:  # never silently die in a thread
-            self.job_q.put(("error", str(e)))
-            return
-        self.job_q.put(("done", (name, tdirs)))
+            errors.append(str(e))
+        self.job_q.put(("done", (name, tdirs, errors)))
 
     def _poll_job(self):
         try:
@@ -320,17 +355,24 @@ class App:
         except queue.Empty:
             self.root.after(150, self._poll_job)
             return
-        if kind == "error":
+        self._job_active = False
+        if kind == "error":  # legacy payload; current code always sends "done"
             self.status_var.set("Conversion failed.")
             messagebox.showerror("win2xcursor", f"Could not convert:\n{payload}")
             return
-        name, tdirs = payload
+        name, tdirs, errors = payload
         self.refresh_list()
+        if errors:
+            messagebox.showwarning("win2xcursor", "Some files failed:\n" + "\n".join(errors))
         if not tdirs:
             self.status_var.set("Nothing converted.")
-            messagebox.showerror("win2xcursor", "Could not convert those files.")
+            if not errors:
+                messagebox.showerror("win2xcursor", "Could not convert those files.")
             return
-        total = sum(len(os.listdir(os.path.join(d, "cursors"))) for d in tdirs.values())
+        try:
+            total = sum(len(os.listdir(os.path.join(d, "cursors"))) for d in tdirs.values())
+        except OSError:
+            total = 0
         self.status_var.set(f"Installed {name} ({total} cursors). Select it and Apply.")
         messagebox.showinfo("win2xcursor", f"Installed theme: {name} ({total} cursors).\nSelect it and Apply.")
         idx = [i for i, x in enumerate(self.list.get(0, "end")) if x.startswith(name)]

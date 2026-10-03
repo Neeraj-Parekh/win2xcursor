@@ -9,7 +9,6 @@ Any *.zip / *.cur / *.ani found directly under --src is converted.
 Theme name defaults to the sanitized file name; use --list to preview.
 """
 import argparse
-import glob
 import os
 import shutil
 import sys
@@ -30,13 +29,19 @@ def main():
                     help="fallback theme for missing roles")
     ap.add_argument("--list", action="store_true",
                     help="only list what would be converted")
+    ap.add_argument("--apply", default=None,
+                    help="also set this theme active after building it")
     a = ap.parse_args()
 
-    pats = ("*.zip", "*.cur", "*.ani")
-    files = []
-    for p in pats:
-        files.extend(glob.glob(os.path.join(a.src, p)))
-    files = sorted(files)
+    if not os.path.isdir(a.src):
+        sys.exit(f"src is not a directory: {a.src}")
+    if "\n" in a.inherit or "\r" in a.inherit or not a.inherit.strip():
+        sys.exit("--inherit must be a single-line theme name")
+
+    files = sorted(f for f in os.listdir(a.src)
+                   if os.path.isfile(os.path.join(a.src, f))
+                   and f.lower().endswith((".zip", ".cur", ".ani")))
+    files = [os.path.join(a.src, f) for f in files]
     if not files:
         sys.exit(f"no cursor packs found in {a.src}")
     if a.list:
@@ -44,14 +49,26 @@ def main():
             print(f"  {os.path.basename(f)} -> {C.sanitize(os.path.splitext(os.path.basename(f))[0])}")
         return
 
+    used_themes = set()
     start = time.time()
     for path in files:
         theme = C.sanitize(os.path.splitext(os.path.basename(path))[0])
-        shutil.rmtree(os.path.join(a.out, theme), ignore_errors=True)
+        base, i = theme, 2  # foo.zip + foo.cur must not delete each other
+        while theme in used_themes:
+            theme = f"{base}-{i}"
+            i += 1
+        used_themes.add(theme)
+        target = os.path.join(a.out, theme)
+        if os.path.lexists(target):
+            print(f"   (replacing existing {theme})")
+            if os.path.islink(target):
+                os.unlink(target)
+            else:
+                shutil.rmtree(target)
         try:
             built = C.convert_input(path, theme_name=theme, out_dir=a.out, inherit=a.inherit)
         except Exception as e:  # keep batch going; report at end of line
-            print(f"!! {os.path.basename(path)}: {e}")
+            print(f"!! {os.path.basename(path)}: {type(e).__name__}: {e}")
             continue
         for k, td in built.items():
             try:
@@ -59,6 +76,8 @@ def main():
             except OSError:
                 n = 0
             print(f"   {k:35s} {n:3d} cursors")
+    if a.apply:
+        C.apply_theme(a.apply)
     print(f"\nDone in {time.time() - start:.1f}s -> {a.out}")
 
 

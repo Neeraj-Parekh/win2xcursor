@@ -93,10 +93,26 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(C.parse_recolor("200,60,120"), (200, 60, 120))
 
     def test_parse_recolor_bad(self):
-        for bad in ("abc", "1,2", "300,0,0", "-1,0,0", ""):
+        for bad in ("abc", "1,2", "1,2,3,4", "300,0,0", "-1,0,0", ""):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     C.parse_recolor(bad)
+
+    def test_check_theme_name(self):
+        C._check_theme_name("My-Theme 2.0")
+        for bad in ("", "  ", "a\nb", "x\x00y"):
+            with self.subTest(bad=repr(bad)):
+                with self.assertRaises(ValueError):
+                    C._check_theme_name(bad)
+
+    def test_convert_sanitizes_theme_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "a.cur")
+            open(src, "wb").write(make_cur(make_png()))
+            out = os.path.join(tmp, "out")
+            built = C.convert_input(src, theme_name="../evil", out_dir=out)
+            self.assertEqual(list(built), ["evil"])
+            self.assertTrue(os.path.isdir(os.path.join(out, "evil")))
 
     def test_zip_variants_groups_by_folder(self):
         z = make_zip(["dark/arrow.cur", "dark/busy.ani", "light/arrow.cur", "loose.cur"])
@@ -124,6 +140,8 @@ class TestDropParsing(unittest.TestCase):
         self.assertFalse(C.is_cursor_source("/tmp/x.inf"))
         self.assertFalse(C.is_cursor_source("/tmp/x.jpg"))
         with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(C.is_cursor_source(tmp))  # empty dir: nothing to convert
+            open(os.path.join(tmp, "a.ani"), "wb").write(b"RIFF")
             self.assertTrue(C.is_cursor_source(tmp))
 
 
@@ -144,8 +162,8 @@ class TestThemeAssembly(unittest.TestCase):
 
 
 class TestSpecCompliance(unittest.TestCase):
-    # Names from Xcursor(3)/Adwaita reference + ArchWiki troubleshooting:
-    # every one must resolve to a real file via roles or ALIASES links.
+    # Every name here must resolve to a real file in a fully-built theme.
+    # (alias/dnd-ask exist only in Adwaita and are covered by Inherits.)
     LEGACY_NAMES = ["top_left_arrow", "ul_angle", "ur_angle", "X_cursor",
                     "hand", "xterm", "ibeam", "plus", "cross_reverse",
                     "diamond_cross", "question_arrow", "all-resize", "no-drop",
@@ -155,33 +173,50 @@ class TestSpecCompliance(unittest.TestCase):
                     "ew-resize", "ns-resize", "ne-resize", "nw-resize",
                     "se-resize", "sw-resize"]
 
-    def test_legacy_names_all_aliased(self):
-        flat = set()
-        for role, targets in C.ALIASES.items():
-            flat.add(role)
-            flat.update(targets)
-        for name in self.LEGACY_NAMES:
-            with self.subTest(name=name):
-                self.assertIn(name, flat, f"{name} has no role or alias mapping")
-
-    def test_aliases_land_on_disk(self):
+    def _full_roles(self):
         frames = C.static_frames(make_cur(make_png()), "arrow")
         xc = C.xcur_from_frames(frames)
-        roles = {"left_ptr": (xc, 1, 0), "hand2": (xc, 1, 0),
-                 "text": (xc, 1, 0), "crosshair": (xc, 1, 0),
-                 "help": (xc, 1, 0), "size_all": (xc, 1, 0),
-                 "sb_h_double_arrow": (xc, 1, 0),
-                 "sb_v_double_arrow": (xc, 1, 0),
-                 "size_fdiag": (xc, 1, 0), "size_bdiag": (xc, 1, 0),
-                 "crossed_circle": (xc, 1, 0)}
+        return {r: (xc, 1, 0) for r in
+                ["left_ptr", "hand2", "text", "crosshair", "help", "size_all",
+                 "sb_h_double_arrow", "sb_v_double_arrow", "size_fdiag",
+                 "size_bdiag", "crossed_circle", "fleur", "watch",
+                 "left_ptr_watch", "grabbing", "pencil", "copy", "cell",
+                 "size_all", "zoom_in", "zoom_out", "context-menu"]}
+
+    def test_alias_keys_are_producible_roles(self):
+        """No dead ALIASES keys: every key must be producible by role_for."""
+        producible = {C.role_for(n) for n in
+                      ["arrow", "busy", "link select", "text select", "move",
+                       "all scroll", "horizontal resize", "vertical resize",
+                       "diagonal resize 1", "diagonal resize 2", "precision",
+                       "unavailable", "help", "working", "handwriting", "copy",
+                       "cell", "zoom in", "zoom out", "location", "pen",
+                       "alias", "grab"]}
+        producible.add("left_ptr")
+        for key in C.ALIASES:
+            with self.subTest(key=key):
+                self.assertIn(key, producible, f"dead ALIASES key: {key}")
+
+    def test_aliases_land_on_disk(self):
         with tempfile.TemporaryDirectory() as tmp:
             tdir = os.path.join(tmp, "T")
-            C.write_theme(roles, tdir, "T", "Adwaita")
+            C.write_theme(self._full_roles(), tdir, "T", "Adwaita")
             cdir = os.path.join(tdir, "cursors")
             for name in self.LEGACY_NAMES:
                 with self.subTest(name=name):
                     self.assertTrue(os.path.exists(os.path.join(cdir, name)),
                                     f"{name} missing from built theme")
+
+    def test_single_role_theme_resolves_core_names(self):
+        """A one-cursor theme must still resolve arrow/default links."""
+        frames = C.static_frames(make_cur(make_png()), "arrow")
+        xc = C.xcur_from_frames(frames)
+        with tempfile.TemporaryDirectory() as tmp:
+            tdir = os.path.join(tmp, "One")
+            C.write_theme({"left_ptr": (xc, 1, 0)}, tdir, "One", "Adwaita")
+            cdir = os.path.join(tdir, "cursors")
+            for name in ("arrow", "default", "top_left_arrow", "X_cursor"):
+                self.assertTrue(os.path.exists(os.path.join(cdir, name)))
 
     def test_multisize_ladder(self):
         frames = C.static_frames(make_cur(make_png(128, 128)), "arrow")
@@ -196,13 +231,97 @@ class TestSpecCompliance(unittest.TestCase):
         for s in (24, 32, 48, 64, 96, 128):
             self.assertIn((s, s), sizes, f"size {s} missing from ladder")
 
-    def test_install_theme_uses_default_out(self):
+    def test_install_theme_copies(self):
         with tempfile.TemporaryDirectory() as tmp:
-            src = os.path.join(tmp, "Theme")
+            src = os.path.join(tmp, "src", "Theme")
             os.makedirs(os.path.join(src, "cursors"))
             open(os.path.join(src, "cursors", "left_ptr"), "wb").write(b"Xcur")
-            got = C.install_theme(src, dest_base=tmp)
+            dst_base = os.path.join(tmp, "icons")
+            got = C.install_theme(src, dest_base=dst_base)
             self.assertTrue(os.path.isfile(os.path.join(got, "cursors", "left_ptr")))
+
+    def test_install_theme_rejects_empty_name(self):
+        with self.assertRaises(ValueError):
+            C.install_theme("/")
+
+
+class TestRobustness(unittest.TestCase):
+    def test_truncated_icondir_no_crash(self):
+        self.assertIsNone(C.parse_icondir(b"\x00\x00\x02\x01\xff\xff"))
+        self.assertIsNone(C.parse_icondir(b"\x00\x00\x02\x01\x02\x00" + b"\x00" * 10))
+        # dangling off/size entry is skipped, valid sibling still parsed
+        import struct as _st
+        good = make_cur(make_png())
+        png = good[22:]
+        head = _st.pack("<HHH", 0, 2, 2)          # cnt=2
+        e_valid = _st.pack("<BBBBHHII", 4, 4, 0, 0, 1, 2, len(png), 6 + 32)
+        e_bad = _st.pack("<BBBBHHII", 4, 4, 0, 0, 0, 0, 10, 99999)  # off past EOF
+        blob = head + e_valid + e_bad + png
+        got = C.parse_icondir(blob)
+        self.assertIsNotNone(got)
+        self.assertEqual(len(got), 1)
+
+    def test_garbage_never_raises(self):
+        for blob in (b"", b"Xcur", b"RIFF....ACON" + b"\x00" * 40,
+                     bytes(range(256)), b"\x00" * 1000):
+            with self.subTest(blob=blob[:8]):
+                try:
+                    C.static_frames(blob, "x")
+                    C.parse_ani(blob, "x")
+                    C.cursors_from_single(blob, "x")
+                except Exception as e:
+                    self.fail(f"raised {type(e).__name__}: {e}")
+
+    def test_dib_24bpp_color_order(self):
+        import struct as _st
+        w, h = 2, 2  # bottom-up, BGR triplets: pure red pixel first
+        row = bytes([0, 0, 255, 0, 0, 255]) + b"\x00\x00"  # stride 8
+        blob = (_st.pack("<IiiHHIIiiII", 40, w, h, 1, 24, 0, 0, 0, 0, 0, 0)
+                + row * 2 + b"\x00" * 8)
+        (size, rgba) = C.dib_to_rgba(blob)
+        self.assertEqual(size, (2, 2))
+        self.assertEqual(tuple(rgba[:4]), (255, 0, 0, 255))  # R,G,B,A
+
+    def test_dib_8bpp_palette_and_bounds(self):
+        import struct as _st
+        pal = bytes([30, 20, 10, 0, 0, 255, 0, 0])  # idx0=BGR(30,20,10), idx1=green
+        row = bytes([0, 1]) + b"\x00\x00"
+        blob = (_st.pack("<IiiHHIIiiII", 40, 2, 2, 1, 8, 0, 0, 0, 0, 2, 0)
+                + pal + row * 2 + b"\x00" * 8)
+        (size, rgba) = C.dib_to_rgba(blob)
+        self.assertEqual(tuple(rgba[:4]), (10, 20, 30, 255))
+        self.assertEqual(tuple(rgba[4:8]), (0, 255, 0, 255))
+        bad = bytearray(blob)
+        bad[40 + 8] = 9  # palette index out of range
+        self.assertIsNone(C.dib_to_rgba(bytes(bad)))
+
+    def test_dib_rejects_bogus_bpp(self):
+        import struct as _st
+        blob = _st.pack("<IiiHHIIiiII", 40, 4, 4, 1, 16, 0, 0, 0, 0, 0, 0) + b"\x00" * 64
+        self.assertIsNone(C.dib_to_rgba(blob))
+
+    def test_folder_accumulates_loose_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = os.path.join(tmp, "pack")
+            os.makedirs(src)
+            open(os.path.join(src, "a.cur"), "wb").write(make_cur(make_png()))
+            open(os.path.join(src, "b.cur"), "wb").write(make_cur(make_png()))
+            out = os.path.join(tmp, "out")
+            built = C.convert_input(src, theme_name="Pack", out_dir=out)
+            cdir = os.path.join(built["Pack"], "cursors")
+            self.assertGreaterEqual(len(os.listdir(cdir)), 1)
+
+    def test_hotspot_clamped_in_ladder(self):
+        import struct as _st
+        frames = [(b"\xff\x00\x00\xff" * 16, 100, 500, 500, 4, 4)]
+        xc = C.xcur_from_frames(frames)
+        self.assertIsNotNone(xc)
+        n = _st.unpack("<I", xc[12:16])[0]
+        for i in range(n):
+            _t, _s, pos = _st.unpack_from("<III", xc, 16 + 12 * i)
+            _h, _ty, _su, _v, w, h2, xh, yh, _d = _st.unpack_from("<9I", xc, pos)
+            self.assertLess(xh, w)
+            self.assertLess(yh, h2)
 
 
 if __name__ == "__main__":

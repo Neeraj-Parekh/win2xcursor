@@ -23,11 +23,15 @@ def parse_icondir(data):
     if len(data) < 6 or data[:2] != b"\x00\x00":
         return None
     typ, cnt = struct.unpack_from("<HH", data, 2)
+    if cnt == 0 or cnt > 256 or len(data) < 6 + 16 * cnt:
+        return None  # corrupt/truncated directory
     imgs = []
     for i in range(cnt):
         w, h, _, _, xh, yh, size, off = struct.unpack_from("<BBBBHHII", data, 6 + 16 * i)
+        if size <= 0 or off + size > len(data):
+            continue  # skip dangling entries instead of aborting
         imgs.append((w or 256, xh, yh, data[off:off + size]))
-    return imgs
+    return imgs or None
 
 def dib_shift(mask):
     if not mask:
@@ -46,19 +50,31 @@ def dib_to_rgba(blob):
     h = struct.unpack_from("<i", blob, 8)[0]
     if w <= 0 or h == 0 or w > 512 or abs(h) > 512:
         return None
-    bpp = u32(blob, 14)
+    bpp = struct.unpack_from("<H", blob, 14)[0]  # bitcount is 16-bit, not 32
     comp = u32(blob, 16)
+    if bpp not in (1, 4, 8, 24, 32):
+        return None
     pal_count = u32(blob, 32)
     bmih = 40
     if comp == 3:
+        if len(blob) < bmih + 16:
+            return None  # truncated BITFIELDS masks
         masks = [u32(blob, bmih), u32(blob, bmih + 4), u32(blob, bmih + 8)]
-        amask = u32(blob, bmih + 12) if bpp == 32 else 0
-        off = bmih + 12 + (pal_count or (2 if bpp <= 8 else 0)) * 4
+        if bpp == 32:
+            amask = u32(blob, bmih + 12)
+            mask_bytes = 16
+        else:
+            amask = 0
+            mask_bytes = 12
+        pal_entries = pal_count or ((1 << bpp) if bpp <= 8 else 0)
+        off = bmih + mask_bytes + pal_entries * 4
     elif comp == 0:
         masks = [0x00FF0000, 0x0000FF00, 0x000000FF]  # B,G,R (Windows byte order)
         amask = 0
         off = bmih + (pal_count or (1 << bpp) if bpp <= 8 else 0) * 4
     else:
+        return None  # RLE (1/2) etc: Pillow already failed, nothing to do
+    if off > len(blob):
         return None
     rowbytes = ((bpp * w + 31) // 32) * 4
     hh = abs(h)
@@ -67,11 +83,22 @@ def dib_to_rgba(blob):
     if avail < want and hh % 2 == 0:
         hh = hh // 2  # doubled height packs the AND mask after the XOR image
     data = blob[off:off + hh * rowbytes]
+    if len(data) < hh * rowbytes:
+        return None  # truncated pixel data
     # 1-bit AND mask follows the XOR image (same orientation, MSB-first)
     mrow = ((w + 31) // 32) * 4
     mdata = blob[off + hh * rowbytes: off + hh * rowbytes + mrow * hh]
     has_mask = len(mdata) >= mrow * hh
+    def chan(v, mask):
+        # Extract a channel and scale it to full 8-bit range.
+        if not mask:
+            return 0
+        width = bin(mask).count("1")
+        return ((v & mask) >> dib_shift(mask)) * 255 // max(1, (1 << width) - 1)
+
     out = bytearray(w * hh * 4)
+    pal_entries = pal_count or ((1 << bpp) if bpp <= 8 else 0)
+    pal_base = off - pal_entries * 4  # palette sits just before the pixel data
     for y in range(hh):
         src = (hh - 1 - y) if h > 0 else y
         row = data[src * rowbytes: src * rowbytes + rowbytes]
@@ -84,27 +111,29 @@ def dib_to_rgba(blob):
             if bpp == 32:
                 v = row[x*4] | (row[x*4+1] << 8) | (row[x*4+2] << 16) | (row[x*4+3] << 24)
                 if amask:
-                    a = ((v & amask) >> dib_shift(amask)) & 0xFF
+                    a = chan(v, amask)
                 else:
                     a = row[x*4+3]  # 32bpp cursor DIBs keep alpha in the high byte
                 if transparent:
                     a = 0
                 out[b], out[b+1], out[b+2], out[b+3] = (
-                    (v & masks[0]) >> dib_shift(masks[0]),
-                    (v & masks[1]) >> dib_shift(masks[1]),
-                    (v & masks[2]) >> dib_shift(masks[2]),
+                    chan(v, masks[0]),
+                    chan(v, masks[1]),
+                    chan(v, masks[2]),
                     a)
             elif bpp == 24:
-                out[b:b+3] = row[x*3:x*3+3]
+                out[b], out[b+1], out[b+2] = row[x*3+2], row[x*3+1], row[x*3]  # BGR -> RGB
                 out[b+3] = 0 if transparent else 255
             elif bpp == 8:
                 p = row[x]
-                pbase = bmih + pal_count * 4
-                out[b], out[b+1], out[b+2], out[b+3] = (blob[pbase + p*4], blob[pbase + p*4 + 1],
-                                                        blob[pbase + p*4 + 2],
+                if p >= pal_entries:
+                    return None  # corrupt palette index
+                out[b], out[b+1], out[b+2], out[b+3] = (blob[pal_base + p*4 + 2],
+                                                        blob[pal_base + p*4 + 1],
+                                                        blob[pal_base + p*4],
                                                         0 if transparent else 255)
             else:
-                return None
+                return None  # 1/4/16bpp: unsupported without Pillow
     return (w, hh), bytes(out)
 
 def blob_to_rgba(blob, tint=None, strength=0.0):
@@ -146,8 +175,10 @@ def collect_icon(blob, out):
         elif tag in (b"rate", b"seq"):
             j += 8 + sz + (sz & 1)
         elif blob[j:j + 2] == b"\x00\x00":
-            out.append(blob[j + 4:j + 4 + sz])       # length-prefixed raw ICONDIR
-            j += 4 + sz + (sz & 1)
+            # Bare ICONDIR without a chunk wrapper: take the rest as one blob;
+            # parse_icondir validates it, garbage gets skipped downstream.
+            out.append(blob[j:])
+            break
         else:
             j += 4
 
@@ -157,32 +188,38 @@ def parse_ani(data, name, tint=None, strength=0.0):
     frames, rates, seq = [], [], []
     i = 12
     while i + 8 <= len(data):
-        cid = data[i:i + 4]; csize = u32(data, i + 4)
+        cid = data[i:i + 4]
+        csize = min(u32(data, i + 4), len(data) - (i + 8))  # clamp corrupt sizes
         body = data[i + 8:i + 8 + csize]
         if cid == b"rate":
-            tags = struct.unpack("<%dI" % (csize // 4), body[:csize - csize % 4])
+            tags = struct.unpack("<%dI" % (len(body) // 4), body[:len(body) - len(body) % 4])
             rates.extend(tags)
         elif cid == b"seq " or cid == b"seqt":
-            tags = struct.unpack("<%dI" % (csize // 4), body[:csize - csize % 4])
+            tags = struct.unpack("<%dI" % (len(body) // 4), body[:len(body) - len(body) % 4])
             seq.extend(tags)
         elif cid == b"LIST" and body[:4] == b"fram":
             j = 4
             while j + 8 <= len(body):
                 tag = body[j:j + 4]
                 sz = u32(body, j + 4)
+                if j + 8 + sz > len(body):
+                    break  # truncated inner chunk
                 if tag in (b"icon", b"icon2"):
                     frames.append(body[j + 8:j + 8 + sz])
                 elif tag == b"fram" and j + 12 <= len(body):
                     collect_icon(body[j + 8:j + 8 + sz], frames)
-                elif tag in (b"LIST", b"fram "):
+                elif tag == b"LIST":
                     collect_icon(body[j + 8:j + 8 + sz], frames)
                 j += 8 + sz + (sz & 1)
         i += 8 + csize + (csize & 1)
     if seq:
-        frames = [frames[k] for k in seq if k < len(frames)]
+        frames = [frames[k] for k in seq if 0 <= k < len(frames)]
     out = []
     for k, fr in enumerate(frames):
-        im = parse_icondir(fr)
+        try:
+            im = parse_icondir(fr)
+        except struct.error:
+            continue
         if not im: continue
         best = max(im, key=lambda e: e[0])
         try:
@@ -193,11 +230,14 @@ def parse_ani(data, name, tint=None, strength=0.0):
         if xh == 0 and yh == 0:
             xh, yh = default_hotspot(name, iw, ih)
         delay = round(rates[k] * 1000 / 60) if k < len(rates) else 125
-        out.append((rgba, max(1, delay), xh, yh, iw, ih))
+        out.append((rgba, min(max(1, delay), 60000), xh, yh, iw, ih))
     return out or None
 
 def static_frames(data, name, tint=None, strength=0.0):
-    imgs = parse_icondir(data)
+    try:
+        imgs = parse_icondir(data)
+    except struct.error:
+        return None
     if not imgs: return None
     by = {}
     for w, xh, yh, blob in imgs:
@@ -225,6 +265,9 @@ def to_xcursor_bytes(rgba):
     out[3::4] = rgba[3::4]   # A
     return bytes(out)
 
+MAX_IMAGE_DIM = 512    # frames larger than this are skipped (Xcursor limit is far lower)
+MAX_XCUR_CHUNKS = 1500  # bounds memory on pathological animated packs
+
 def xcur_from_frames(frames, sizes=(24, 32, 48, 64, 96)):
     """Build XCursor bytes with a multi-size ladder per frame.
 
@@ -232,8 +275,12 @@ def xcur_from_frames(frames, sizes=(24, 32, 48, 64, 96)):
     single-size (e.g. 128-only) themes render as white boxes on some paths
     (notably resize cursors during tiling). Hotspots scale with size.
     """
+    if not frames:
+        return None
     chunks = []
     for rgba, delay, xh, yh, w, h in frames:
+        if w < 1 or h < 1 or max(w, h) > MAX_IMAGE_DIM:
+            continue
         try:
             base = Image.frombytes("RGBA", (w, h), rgba)
         except Exception:
@@ -241,6 +288,8 @@ def xcur_from_frames(frames, sizes=(24, 32, 48, 64, 96)):
         ladder = [s for s in sizes if s < max(w, h)]
         ladder.append(max(w, h))
         for s in ladder:
+            if len(chunks) >= MAX_XCUR_CHUNKS:
+                break
             sw = s if w >= h else max(1, round(w * s / max(w, h)))
             sh = s if h >= w else max(1, round(h * s / max(w, h)))
             if (sw, sh) == (w, h):
@@ -249,9 +298,13 @@ def xcur_from_frames(frames, sizes=(24, 32, 48, 64, 96)):
             else:
                 im = base.resize((sw, sh), Image.LANCZOS)
                 scaled = to_xcursor_bytes(im.tobytes())
-                sxh = min(sw - 1, round(xh * sw / w))
-                syh = min(sh - 1, round(yh * sh / h))
+                sxh = round(xh * sw / w)
+                syh = round(yh * sh / h)
+            sxh = min(max(0, sxh), sw - 1)  # Xcursor requires hotspot inside image
+            syh = min(max(0, syh), sh - 1)
             chunks.append((sw, struct.pack("<9I", 36, 0xFFFD0002, sw, 1, sw, sh, sxh, syh, delay) + scaled))
+    if not chunks:
+        return None
     n = len(chunks)
     head = bytearray(b"Xcur") + struct.pack("<III", 16, 0x00010000, n)
     pos = 16 + 12 * n
@@ -300,6 +353,7 @@ TABLE = [
     ("move", "fleur"), ("all scroll", "size_all"), ("size all", "size_all"),
     ("cell", "cell"), ("cross cell", "cell"), ("crosshair cell", "cell"),
     ("vertical text", "vertical-text"), ("alt scroll", "pointer_move"),
+    ("pointer move", "fleur"),
     ("handwriting", "pencil"), ("pen", "pencil"), ("pencil", "pencil"),
     ("alias", "dnd-move"), ("copy", "copy"),
     ("zoom in", "zoom_in"), ("zoom-in", "zoom_in"), ("zoom out", "zoom_out"), ("zoom-out", "zoom_out"),
@@ -341,6 +395,13 @@ NAME_OVERRIDES = {
     "nw se": "size_fdiag", "ne sw": "size_bdiag",
 }
 
+# Pre-sorted once: per-file sorting of ~100 regexes was the hot loop.
+_TABLE_MULTI = sorted(((kw, r) for kw, r in TABLE if len(kw.split()) > 1),
+                      key=lambda t: -len(t[0]))
+_TABLE_SINGLE = sorted(((kw, r) for kw, r in TABLE
+                        if len(kw.split()) == 1 and kw not in GENERIC),
+                       key=lambda t: -len(t[0]))
+
 def role_for(name):
     n = name.lower()
     n = re.sub(r"[^a-z0-9]", " ", n)
@@ -353,13 +414,11 @@ def role_for(name):
     def boundary(hit):
         return re.search(r"(?:^| )" + re.escape(hit) + r"(?:$| )", hay) is not None
     # 1) multi-word phrases (most specific) — match the phrase as a sequence
-    for kw, role in sorted(TABLE, key=lambda t: -len(t[0])):
-        if len(kw.split()) > 1 and boundary(kw):
+    for kw, role in _TABLE_MULTI:
+        if boundary(kw):
             return role
     # 2) single-word non-generic keywords, longest first
-    singles = sorted(((kw, r) for kw, r in TABLE if len(kw.split()) == 1 and kw not in GENERIC),
-                     key=lambda t: -len(t[0]))
-    for kw, role in singles:
+    for kw, role in _TABLE_SINGLE:
         if boundary(kw):
             return role
     # 3) generic fallback words (cursor/arrow/select/default)
@@ -371,32 +430,29 @@ def role_for(name):
 ALIASES = {
     "crossed_circle": ["not-allowed", "forbidden", "no_drop", "no-drop", "dnd-no-drop"],
     "left_ptr": ["arrow", "default", "top_left_arrow", "ul_angle", "ur_angle", "X_cursor"],
-    "hand2": ["hand1", "hand", "link", "pointer"],
-    "fleur": ["pointer_move", "move", "4498f0e0c1937ffe01fd06f973665830"],
-    "xterm": ["text"],
+    "hand2": ["hand", "link", "pointer", "e29285e29e6d1d1d310ec8a0f3ee52"],
+    "fleur": ["pointer_move", "move", "size_all", "all-resize", "all-scroll",
+              "4498f0e0c1937ffe01fd06f973665830"],
     "text": ["ibeam", "xterm"],
     "crosshair": ["cross", "tcross", "plus", "cross_reverse", "diamond_cross"],
-    "size_fdiag": ["fd_double_arrow", "nwse-resize", "nw-resize", "se-resize",
+    "size_fdiag": ["bd_double_arrow", "nwse-resize", "nw-resize", "se-resize",
                    "top_left_corner", "bottom_right_corner", "resize-corner-2"],
-    "size_bdiag": ["bd_double_arrow", "nesw-resize", "ne-resize", "sw-resize",
+    "size_bdiag": ["fd_double_arrow", "nesw-resize", "ne-resize", "sw-resize",
                    "top_right_corner", "bottom_left_corner", "resize-corner-1"],
     "sb_h_double_arrow": ["h_double_arrow", "col-resize", "e-resize", "w-resize",
                           "ew-resize", "left_side", "right_side"],
     "sb_v_double_arrow": ["v_double_arrow", "row-resize", "n-resize", "s-resize",
                           "ns-resize", "top_side", "bottom_side"],
     "help": ["question_arrow"],
-    "wait": ["watch"],
     "left_ptr_watch": ["08e8e1c95fe2fc01f976f1e063a24c0d",
                        "progress", "app_starting"],
     "watch": ["2825c929d5411e5819219e75ddaf8b9c", "wait"],
-    "hand1": ["e29285e29e6d1d1d310ec8a0f3ee52"],
-    "fleur": ["4498f0e0c1937ffe01fd06f973665830", "move"],
     "pencil": ["028006030e0e7ebffc7f707070c6d0c2", "handwriting"],
-    "size_all": ["all-scroll", "all-resize"],
+    "size_all": ["all-scroll", "all-resize", "fleur", "move"],
     "cell": ["crosshair-cell"],
     "zoom_in": ["zoom-in", "zoomin"],
     "zoom_out": ["zoom-out", "zoomout"],
-    "grabbing": ["grab", "dnd-move"],
+    "grabbing": ["grab", "hand1", "dnd-move"],
 }
 
 def cursors_from_single(data, name, tint=None, strength=0.0):
@@ -405,7 +461,10 @@ def cursors_from_single(data, name, tint=None, strength=0.0):
         frames = static_frames(data, name, tint, strength)
     if not frames:
         return None
-    return xcur_from_frames(frames), len(frames)
+    xc = xcur_from_frames(frames)
+    if xc is None:
+        return None
+    return xc, len(frames)
 
 def sanitize(name):
     return re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-") or "Theme"
@@ -413,9 +472,13 @@ def sanitize(name):
 CURSOR_EXTS = (".cur", ".ani", ".zip")
 
 def is_cursor_source(path):
-    """True for convertible inputs: .cur/.ani/.zip files or directories."""
+    """True for convertible inputs: .cur/.ani/.zip files, or directories
+    containing at least one of them."""
     if os.path.isdir(path):
-        return True
+        try:
+            return any(f.lower().endswith(CURSOR_EXTS) for f in os.listdir(path))
+        except OSError:
+            return False
     return os.path.splitext(path)[1].lower() in CURSOR_EXTS
 
 def parse_drop_files(data):
@@ -439,7 +502,13 @@ def _main_cursor(nm):
 
 def write_theme(all_roles, tdir, theme_name, inherit):
     import shutil as _sh
-    if os.path.isdir(tdir):
+    _check_theme_name(theme_name)
+    if "\n" in inherit or "\r" in inherit or not inherit.strip():
+        raise ValueError(f"bad inherit theme name: {inherit!r}")
+    # Never follow a planted symlink: unlink it instead of rmtree-ing its target.
+    if os.path.islink(tdir):
+        os.unlink(tdir)
+    elif os.path.isdir(tdir):
         _sh.rmtree(tdir)
     cdir = os.path.join(tdir, "cursors")
     os.makedirs(cdir, exist_ok=True)
@@ -473,19 +542,37 @@ def _zip_variants(z):
         groups.setdefault(key, []).append(ent)
     return groups
 
+MAX_ZIP_ENTRIES = 2000   # bounds zip-bomb walking
+MAX_ZIP_BYTES = 500 * 1024 * 1024
+MAX_VARIANTS = 20
+
+def _merge_role(all_roles, role, xc, nfr, pri):
+    """Keep the best candidate per role: most frames wins, then main-cursor priority."""
+    prior = all_roles.get(role)
+    if prior is None or nfr > prior[1] or (nfr == prior[1] and pri > prior[2]):
+        all_roles[role] = (xc, nfr, pri)
+
 def convert_input(path, theme_name=None, out_dir=None, inherit=DEFAULT_INHERIT, tint=None, strength=0.0):
+    import tempfile as _tf
     theme_map = {}
     if os.path.isdir(path):
         items = [os.path.join(path, f) for f in sorted(os.listdir(path))
                  if re.search(r"\.(cur|ani|zip)$", f, re.I)]
         base = os.path.basename(os.path.abspath(path.rstrip("/")))
-        default_name = theme_name or sanitize(base)
+        default_name = sanitize(theme_name) if theme_name else sanitize(base)
     else:
         if not os.path.isfile(path):
             raise FileNotFoundError(f"input not found: {path}")
         items = [path]
-        default_name = theme_name or sanitize(os.path.splitext(os.path.basename(path))[0])
+        if theme_name:
+            default_name = sanitize(theme_name)
+        else:
+            default_name = sanitize(os.path.splitext(os.path.basename(path))[0])
+    if out_dir is None:
+        out_dir = _tf.mkdtemp(prefix="win2xcursor-")
+        print(f"note: no --out given, building into {out_dir} (use --install to keep it)")
     built = 0
+    loose_roles = {}  # non-zip files in a folder accumulate into one theme
     for item in items:
         if re.search(r"\.zip$", item, re.I):
             try:
@@ -494,10 +581,23 @@ def convert_input(path, theme_name=None, out_dir=None, inherit=DEFAULT_INHERIT, 
                 print(f"!! skipping corrupt zip: {item}")
                 continue
             with zf as z:
+                infos = [i for i in z.infolist()
+                         if re.search(r"\.(cur|ani)$", i.filename, re.I)]
+                if len(infos) > MAX_ZIP_ENTRIES:
+                    print(f"!! {item}: {len(infos)} cursor entries, only first {MAX_ZIP_ENTRIES} tried")
+                    infos = infos[:MAX_ZIP_ENTRIES]
+                if sum(i.file_size for i in infos) > MAX_ZIP_BYTES:
+                    print(f"!! skipping {item}: uncompressed size over {MAX_ZIP_BYTES // 1024 // 1024}MB")
+                    continue
                 groups = _zip_variants(z)
+                # _zip_variants re-filters namelist; restrict to the capped set
+                keep = {i.filename for i in infos}
+                groups = {k: [e for e in v if e in keep] for k, v in groups.items()}
+                groups = {k: v for k, v in groups.items() if v}
                 multi = len(groups) > 1
                 for sub, ents in groups.items():
-                    if built >= 20:
+                    if built >= MAX_VARIANTS:
+                        print(f"!! stopping at {MAX_VARIANTS} themes (variants beyond this dropped)")
                         break
                     vname = default_name
                     if multi and sub not in (".", ""):
@@ -510,18 +610,23 @@ def convert_input(path, theme_name=None, out_dir=None, inherit=DEFAULT_INHERIT, 
                     all_roles = {}
                     for ent in ents:
                         nm = os.path.splitext(os.path.basename(ent))[0]
-                        got = cursors_from_single(z.read(ent), nm, tint, strength)
+                        try:
+                            raw = z.read(ent)
+                        except Exception as e:
+                            print(f"!! unreadable entry {ent}: {e}")
+                            continue
+                        try:
+                            got = cursors_from_single(raw, nm, tint, strength)
+                        except Exception as e:
+                            print(f"!! bad cursor data in {ent}: {e}")
+                            continue
                         if not got:
                             continue
                         xc, nfr = got
-                        role = role_for(nm)
-                        pri = _main_cursor(nm)
-                        prior = all_roles.get(role)
-                        if prior is None or nfr > prior[1] or (nfr == prior[1] and pri > prior[2]):
-                            all_roles[role] = (xc, nfr, pri)
+                        _merge_role(all_roles, role_for(nm), xc, nfr, _main_cursor(nm))
                     if not all_roles:
                         continue
-                    tdir = os.path.join(out_dir or os.path.expanduser("~/.icons"), vname)
+                    tdir = os.path.join(out_dir, vname)
                     write_theme(all_roles, tdir, vname, inherit)
                     theme_map[vname] = tdir
                     built += 1
@@ -533,30 +638,51 @@ def convert_input(path, theme_name=None, out_dir=None, inherit=DEFAULT_INHERIT, 
             except OSError as e:
                 print(f"!! cannot read {item}: {e}")
                 continue
-            got = cursors_from_single(raw, nm, tint, strength)
+            try:
+                got = cursors_from_single(raw, nm, tint, strength)
+            except Exception as e:
+                print(f"!! bad cursor data in {item}: {e}")
+                continue
             if not got:
                 print(f"!! no cursor frames in {item}")
                 continue
-            xc, _ = got
-            all_roles = {role_for(nm): (xc, 1, _main_cursor(nm))}
-            tdir = os.path.join(out_dir or os.path.expanduser("~/.icons"), default_name)
-            write_theme(all_roles, tdir, default_name, inherit)
-            theme_map[default_name] = tdir
+            xc, nfr = got
+            _merge_role(loose_roles, role_for(nm), xc, nfr, _main_cursor(nm))
+    if loose_roles:
+        tdir = os.path.join(out_dir, default_name)
+        write_theme(loose_roles, tdir, default_name, inherit)
+        theme_map[default_name] = tdir
     return theme_map
 
+def _check_theme_name(theme):
+    """Theme names end up in gsettings, file paths and shell files: reject
+    control characters/newlines that could break out of those contexts."""
+    if not theme or not theme.strip() or re.search(r"[\x00-\x1f\x7f]", theme):
+        raise ValueError(f"bad theme name: {theme!r}")
+    return theme
+
 def install_theme(tdir, dest_base=None):
-    dst = os.path.join(os.path.expanduser(dest_base or DEFAULT_OUT), os.path.basename(tdir))
-    if os.path.abspath(tdir) == os.path.abspath(dst):
+    base = os.path.basename(os.path.normpath(tdir))
+    if not base or base in (".", ".."):
+        raise ValueError(f"refusing to install theme with empty name from {tdir!r}")
+    dest_base = os.path.expanduser(dest_base or DEFAULT_OUT)
+    dst = os.path.join(dest_base, base)
+    if os.path.realpath(tdir) == os.path.realpath(dst):
         return dst
+    if not os.path.realpath(dst).startswith(os.path.realpath(dest_base) + os.sep):
+        raise ValueError(f"install destination escapes icon dir: {dst!r}")
     import shutil
-    if os.path.exists(dst):
+    if os.path.islink(dst):
+        os.unlink(dst)
+    elif os.path.exists(dst):
         shutil.rmtree(dst)
-    shutil.copytree(tdir, dst)
+    shutil.copytree(tdir, dst, symlinks=True)  # keep alias symlinks as links
     return dst
 
 def apply_theme(theme):
     import shutil
     import subprocess
+    _check_theme_name(theme)
     if shutil.which("gsettings"):
         subprocess.run(["gsettings", "set", "org.gnome.desktop.interface", "cursor-theme", theme])
     else:
@@ -564,13 +690,24 @@ def apply_theme(theme):
     for f in ("~/.config/gtk-3.0/settings.ini", "~/.config/gtk-4.0/settings.ini"):
         p = os.path.expanduser(f)
         if os.path.exists(p):
-            lines = ["%s\n" % (l if not l.startswith("gtk-cursor-theme-name=")
-                               else f"gtk-cursor-theme-name={theme}") for l in open(p).read().splitlines()]
-            open(p, "w").writelines(lines)
+            try:
+                old = open(p).read().splitlines()
+            except OSError as e:
+                print(f"note: cannot read {p}: {e}")
+                continue
+            if any(l.startswith("gtk-cursor-theme-name=") for l in old):
+                lines = ["%s\n" % (l if not l.startswith("gtk-cursor-theme-name=")
+                                   else f"gtk-cursor-theme-name={theme}") for l in old]
+            else:
+                lines = [l + "\n" for l in old] + [f"gtk-cursor-theme-name={theme}\n"]
+            try:
+                open(p, "w").writelines(lines)
+            except OSError as e:
+                print(f"note: cannot write {p}: {e}")
     prof = os.path.expanduser("~/.profile")
     if os.path.exists(prof):
         t = open(prof).read()
-        t = re.sub(r"^export XCURSOR_THEME=.*$", f"export XCURSOR_THEME={theme}", t, flags=re.M)
+        t = re.sub(r"^export XCURSOR_THEME=.*$", lambda m: f"export XCURSOR_THEME={theme}", t, flags=re.M)
         if "XCURSOR_THEME=" not in t:
             t += f"\nexport XCURSOR_THEME={theme}\n"
         # Wayland compositors read themes through libXcursor: the user icon
@@ -584,8 +721,11 @@ def apply_theme(theme):
 
 def parse_recolor(spec):
     """Parse 'R,G,B' into an (r, g, b) tuple or raise ValueError with a clear message."""
+    raw = [x for x in spec.replace(";", ",").split(",")]
+    if len(raw) != 3:
+        raise ValueError(f'bad --recolor {spec!r}: expected exactly "R,G,B" like "200,60,120"')
     try:
-        parts = [int(x) for x in spec.replace(";", ",").split(",")[:3]]
+        parts = [int(x) for x in raw]
     except ValueError:
         raise ValueError(f'bad --recolor {spec!r}: expected "R,G,B" like "200,60,120"')
     if len(parts) != 3 or not all(0 <= v <= 255 for v in parts):
@@ -606,12 +746,22 @@ if __name__ == "__main__":
     ap.add_argument("--strength", default=0.5, type=float, help="recolor strength 0-1 (default 0.5)")
     ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     a = ap.parse_args()
+    a.out = os.path.expanduser(a.out)
     try:
         tint = parse_recolor(a.recolor) if a.recolor else None
     except ValueError as e:
         ap.error(str(e))
     if not 0 <= a.strength <= 1:
         ap.error("--strength must be between 0 and 1")
+    if "\n" in a.inherit or "\r" in a.inherit or not a.inherit.strip():
+        ap.error("--inherit must be a single-line theme name")
+    if a.theme is not None:
+        try:
+            _check_theme_name(a.theme)
+        except ValueError as e:
+            ap.error(str(e))
+    if a.apply and not a.install and os.path.realpath(a.out) != os.path.realpath(DEFAULT_OUT):
+        ap.error("--apply needs --install when --out is not the icon dir")
     if tint is not None and a.strength <= 0:
         tint, a.strength = None, 0.0
     if tint is not None:
