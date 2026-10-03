@@ -296,9 +296,48 @@ class App:
 
     def show_preview(self, path):
         cdir = os.path.join(path, "cursors") if path else ""
-        self.photos.clear()
-        for lab, cap, role in zip(self.prev_imgs, self.prev_caps, PREVIEW_ROLES):
+        key = (cdir, tuple(PREVIEW_ROLES))
+        if key == getattr(self, "_prev_key", None):
+            return  # already showing this theme
+        self._prev_key = key
+        self._prev_seq = getattr(self, "_prev_seq", 0) + 1
+        seq = self._prev_seq
+        for lab, cap in zip(self.prev_imgs, self.prev_caps):
+            lab.configure(image="")
+            cap.configure(text="…")
+        threading.Thread(target=self._decode_preview_bg,
+                         args=(cdir, seq), daemon=True).start()
+
+    def _decode_preview_bg(self, cdir, seq):
+        """Decode preview images off the main thread; stale jobs are dropped."""
+        rows = []
+        for role in PREVIEW_ROLES:
             im = xcur_first_frame(os.path.join(cdir, role), size=PREVIEW_PX) if cdir else None
+            ok = bool(cdir and os.path.exists(os.path.join(cdir, role)))
+            rows.append((role, im, ok))
+        self.job_q.put(("preview", (seq, rows)))
+        self.root.after(0, self._poll_preview)
+
+    def _poll_preview(self):
+        drained = None
+        while True:
+            try:
+                kind, payload = self.job_q.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "preview":
+                drained = payload  # keep only the newest; drop stale
+            else:
+                self.job_q.put((kind, payload))  # not ours; leave for _poll_job
+                break
+        if drained is None:
+            self.root.after(150, self._poll_preview)  # decode still running
+            return
+        seq, rows = drained
+        if seq != getattr(self, "_prev_seq", 0):
+            return  # user moved on; drop stale decode
+        self.photos.clear()
+        for lab, cap, (role, im, ok) in zip(self.prev_imgs, self.prev_caps, rows):
             if im is not None and HAS_IMAGETK:
                 bg = checkerboard(PREVIEW_PX)
                 bg.alpha_composite(im, ((PREVIEW_PX - im.width) // 2,
@@ -309,7 +348,7 @@ class App:
                 cap.configure(text=role)
             else:
                 lab.configure(image="")
-                cap.configure(text=role if (cdir and os.path.exists(os.path.join(cdir, role))) else "—")
+                cap.configure(text=role if ok else "—")
 
     # -- actions --------------------------------------------------------
     @staticmethod
@@ -460,6 +499,10 @@ class App:
         try:
             kind, payload = self.job_q.get_nowait()
         except queue.Empty:
+            self.root.after(150, self._poll_job)
+            return
+        if kind == "preview":
+            self.job_q.put((kind, payload))  # preview poller owns these
             self.root.after(150, self._poll_job)
             return
         self._job_active = False

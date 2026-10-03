@@ -789,6 +789,22 @@ def install_theme(tdir, dest_base=None):
     shutil.copytree(tdir, dst, symlinks=True)  # keep alias symlinks as links
     return dst
 
+def _atomic_write_text(path, lines):
+    """Write text lines atomically (tmp + rename) so a crash can't truncate."""
+    import tempfile as _tf
+    d = os.path.dirname(path) or "."
+    fd, tmp = _tf.mkstemp(dir=d, prefix=".win2xcursor-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.writelines(lines)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
 def apply_theme(theme):
     import shutil
     import subprocess
@@ -811,7 +827,7 @@ def apply_theme(theme):
             else:
                 lines = [l + "\n" for l in old] + [f"gtk-cursor-theme-name={theme}\n"]
             try:
-                open(p, "w").writelines(lines)
+                _atomic_write_text(p, lines)
             except OSError as e:
                 print(f"note: cannot write {p}: {e}")
     prof = os.path.expanduser("~/.profile")
