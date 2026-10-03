@@ -37,7 +37,20 @@ SEARCH = [os.path.expanduser("~/.local/share/icons"),
           os.path.expanduser("~/.icons"),
           "/usr/share/icons"]
 PREVIEW_ROLES = ["left_ptr", "hand2", "text", "watch"]
+PREVIEW_PX = 96  # preview cell size in pixels (4 cells must fit the panel)
 OUT_DIR = os.path.expanduser("~/.local/share/icons")
+
+
+def checkerboard(px):
+    """Light/dark checker tile so cursor transparency reads correctly."""
+    tile, n = 8, px // 8 + 1
+    bg = Image.new("RGBA", (px, px), (58, 58, 68, 255))
+    light = Image.new("RGBA", (tile, tile), (78, 78, 92, 255))
+    for y in range(n):
+        for x in range(n):
+            if (x + y) % 2 == 0:
+                bg.paste(light, (x * tile, y * tile))
+    return bg
 
 
 def installed_themes():
@@ -149,11 +162,25 @@ class App:
         mid = tk.Frame(root, bg="#24273a")
         mid.pack(fill="both", expand=True, padx=18)
 
-        self.list = tk.Listbox(mid, height=12, width=32, font=("", 11),
+        self.filter_var = tk.StringVar()
+        listframe = tk.Frame(mid, bg="#24273a")
+        listframe.pack(side="left", fill="y")
+        tk.Entry(listframe, textvariable=self.filter_var, font=("", 10),
+                 bg="#363a4f", fg="#cad3f5", relief="flat", width=30).pack(fill="x", pady=(0, 4))
+        self.filter_var.trace_add("write", lambda *a: self.refresh_list(keep_selection=True))
+        lbframe = tk.Frame(listframe, bg="#24273a")
+        lbframe.pack(fill="y", expand=True)
+        self.list = tk.Listbox(lbframe, height=12, width=32, font=("", 11),
                                bg="#363a4f", fg="#cad3f5",
                                selectbackground="#8aadf4", selectforeground="#24273a", relief="flat")
         self.list.pack(side="left", fill="y")
+        vsb = tk.Scrollbar(lbframe, orient="vertical", command=self.list.yview)
+        vsb.pack(side="left", fill="y")
+        hsb = tk.Scrollbar(listframe, orient="horizontal", command=self.list.xview)
+        hsb.pack(fill="x")
+        self.list.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         self.list.bind("<<ListboxSelect>>", self.show_info)
+        self.list.bind("<Double-Button-1>", lambda e: self.apply_selected())
 
         right = tk.Frame(mid, bg="#24273a")
         right.pack(side="left", fill="both", expand=True, padx=(12, 0))
@@ -162,12 +189,16 @@ class App:
         self.prev = tk.Frame(right, bg="#363a4f")
         self.prev.pack(fill="x", pady=(2, 8))
         self.prev_imgs = []
-        for _ in PREVIEW_ROLES:
+        self.prev_caps = []
+        for role in PREVIEW_ROLES:
             cell = tk.Frame(self.prev, bg="#363a4f")
-            cell.pack(side="left", padx=8, pady=8)
-            lab = tk.Label(cell, bg="#363a4f", fg="#cad3f5", width=12)
-            lab.pack()
-            self.prev_imgs.append(lab)
+            cell.pack(side="left", padx=5, pady=8)
+            img = tk.Label(cell, bg="#363a4f", width=PREVIEW_PX, height=PREVIEW_PX)
+            img.pack()
+            cap = tk.Label(cell, bg="#363a4f", fg="#8aadf4", font=("", 9), width=14)
+            cap.pack()
+            self.prev_imgs.append(img)
+            self.prev_caps.append(cap)
 
         tk.Label(right, textvariable=self.info_var, bg="#363a4f", fg="#cad3f5",
                  wraplength=320, justify="left").pack(fill="x", pady=(0, 8))
@@ -197,10 +228,22 @@ class App:
         btns.pack(pady=8)
         for txt, cmd in [("Apply theme", self.apply_selected),
                          ("Convert new cursor…", self.convert_new),
+                         ("Delete theme", self.delete_selected),
                          ("Revert to Adwaita", self.revert),
                          ("Refresh", self.refresh_list)]:
             tk.Button(btns, text=txt, command=cmd, bg="#8aadf5", fg="#24273a",
                       activebackground="#7dc4e4", padx=10, pady=4, relief="flat").pack(side="left", padx=5)
+
+        sizerow = tk.Frame(root, bg="#24273a")
+        sizerow.pack(pady=(0, 4))
+        tk.Label(sizerow, text="Cursor size:", bg="#24273a", fg="#cad3f5").pack(side="left", padx=4)
+        self.size_var = tk.StringVar(value=self.current_size())
+        tk.Spinbox(sizerow, from_=24, to=96, increment=8, width=5,
+                   textvariable=self.size_var, bg="#363a4f", fg="#cad3f5",
+                   relief="flat").pack(side="left", padx=4)
+        tk.Button(sizerow, text="Set size", command=self.apply_size,
+                  bg="#8aadf5", fg="#24273a", activebackground="#7dc4e4",
+                  padx=10, relief="flat").pack(side="left", padx=4)
 
         self.prog = tk.Label(root, textvariable=self.status_var, bg="#24273a", fg="#8aadf4")
         self.prog.pack(pady=(0, 10))
@@ -213,12 +256,14 @@ class App:
         self.refresh_list()
 
     # -- theme list -----------------------------------------------------
-    def refresh_list(self):
+    def refresh_list(self, keep_selection=False):
         keep = self.selected_name()
         self.themes = installed_themes()
         cur = current_theme()
+        filt = self.filter_var.get().strip().lower()
         self.list.delete(0, "end")
-        names = sorted(self.themes)
+        names = sorted(n for n in self.themes
+                       if not filt or filt in n.lower())
         for name in names:
             mark = "  ◉" if name == cur else ""
             self.list.insert("end", name + mark)
@@ -252,17 +297,69 @@ class App:
     def show_preview(self, path):
         cdir = os.path.join(path, "cursors") if path else ""
         self.photos.clear()
-        for lab, role in zip(self.prev_imgs, PREVIEW_ROLES):
-            im = xcur_first_frame(os.path.join(cdir, role)) if cdir else None
+        for lab, cap, role in zip(self.prev_imgs, self.prev_caps, PREVIEW_ROLES):
+            im = xcur_first_frame(os.path.join(cdir, role), size=PREVIEW_PX) if cdir else None
             if im is not None and HAS_IMAGETK:
-                ph = ImageTk.PhotoImage(im)
+                bg = checkerboard(PREVIEW_PX)
+                bg.alpha_composite(im, ((PREVIEW_PX - im.width) // 2,
+                                        (PREVIEW_PX - im.height) // 2))
+                ph = ImageTk.PhotoImage(bg)
                 self.photos.append(ph)  # keep a reference
-                lab.configure(image=ph, text=role, compound="top")
+                lab.configure(image=ph)
+                cap.configure(text=role)
             else:
-                lab.configure(image="", compound="none",
-                              text=role if (cdir and os.path.exists(os.path.join(cdir, role))) else "—")
+                lab.configure(image="")
+                cap.configure(text=role if (cdir and os.path.exists(os.path.join(cdir, role))) else "—")
 
     # -- actions --------------------------------------------------------
+    @staticmethod
+    def current_size():
+        try:
+            out = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "cursor-size"],
+                                 capture_output=True, text=True, timeout=5).stdout.strip()
+            return str(int(out))
+        except Exception:
+            return "24"
+
+    def apply_size(self):
+        try:
+            size = int(self.size_var.get())
+        except (ValueError, TypeError):
+            messagebox.showerror("win2xcursor", "Size must be a number (e.g. 24, 32, 48).")
+            return
+        if size < 16 or size > 256:
+            messagebox.showerror("win2xcursor", "Size must be between 16 and 256.")
+            return
+        try:
+            subprocess.run(["gsettings", "set", "org.gnome.desktop.interface",
+                            "cursor-size", str(size)], check=True, timeout=10)
+        except Exception as e:
+            messagebox.showerror("win2xcursor", f"Could not set size:\n{e}")
+            return
+        messagebox.showinfo("win2xcursor", f"Cursor size set to {size}.\nRestart apps to see it everywhere.")
+
+    def delete_selected(self):
+        import shutil
+        name = self.selected_name()
+        if not name:
+            messagebox.showinfo("win2xcursor", "Pick a theme first.")
+            return
+        path = self.themes.get(name, "")
+        if not path or os.path.realpath(path).startswith("/usr/share/"):
+            messagebox.showerror("win2xcursor", "Refusing to delete a system theme.")
+            return
+        if not messagebox.askyesno("win2xcursor", f"Delete theme {name!r}?\n{path}"):
+            return
+        try:
+            if os.path.islink(path):
+                os.unlink(path)
+            else:
+                shutil.rmtree(path)
+        except OSError as e:
+            messagebox.showerror("win2xcursor", f"Could not delete:\n{e}")
+            return
+        self.refresh_list()
+
     def apply_selected(self):
         name = self.selected_name()
         if not name:
