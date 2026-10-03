@@ -500,6 +500,38 @@ def _main_cursor(nm):
         return 1
     return 0
 
+# Last-resort chains: these names MUST resolve to something in-theme, or the
+# compositor shows a blank box (seen during overview window drags, which ask
+# for grabbing/dnd-move even when the pack never shipped them). First
+# existing candidate wins; left_ptr is the final backstop — an arrow is
+# always better than nothing. Runs after ALIASES so real art always wins.
+FALLBACKS = [
+    ("grabbing", ["grabbing", "fleur", "hand2", "left_ptr"]),
+    ("dnd-move", ["dnd-move", "fleur", "grabbing", "hand2", "left_ptr"]),
+    ("dnd-copy", ["dnd-copy", "copy", "hand2", "left_ptr"]),
+    ("dnd-link", ["dnd-link", "hand2", "left_ptr"]),
+    ("dnd-ask", ["dnd-ask", "help", "copy", "left_ptr"]),
+    ("alias", ["alias", "copy", "hand2", "left_ptr"]),
+    ("move", ["move", "fleur", "hand2", "left_ptr"]),
+    ("fleur", ["fleur", "move", "hand2", "left_ptr"]),
+    ("copy", ["copy", "hand2", "left_ptr"]),
+    ("help", ["help", "left_ptr"]),
+    ("text", ["text", "left_ptr"]),
+    ("crosshair", ["crosshair", "left_ptr"]),
+    ("cell", ["cell", "crosshair", "left_ptr"]),
+    ("crossed_circle", ["crossed_circle", "left_ptr"]),
+    ("dnd-no-drop", ["dnd-no-drop", "crossed_circle", "left_ptr"]),
+    ("watch", ["watch", "left_ptr_watch", "left_ptr"]),
+    ("left_ptr_watch", ["left_ptr_watch", "watch", "left_ptr"]),
+    ("hand2", ["hand2", "left_ptr"]),
+    ("size_all", ["size_all", "fleur", "hand2", "left_ptr"]),
+    ("pencil", ["pencil", "left_ptr"]),
+    ("vertical-text", ["vertical-text", "text", "left_ptr"]),
+    ("context-menu", ["context-menu", "left_ptr"]),
+    ("zoom_in", ["zoom_in", "hand2", "left_ptr"]),
+    ("zoom_out", ["zoom_out", "hand2", "left_ptr"]),
+]
+
 def write_theme(all_roles, tdir, theme_name, inherit):
     import shutil as _sh
     _check_theme_name(theme_name)
@@ -525,6 +557,13 @@ def write_theme(all_roles, tdir, theme_name, inherit):
                 p = os.path.join(cdir, a)
                 if not os.path.exists(p):
                     os.symlink(role, p)
+    for name, candidates in FALLBACKS:
+        if os.path.exists(os.path.join(cdir, name)):
+            continue
+        for cand in candidates:
+            if cand != name and os.path.exists(os.path.join(cdir, cand)):
+                os.symlink(cand, os.path.join(cdir, name))
+                break
     with open(os.path.join(tdir, "index.theme"), "w") as f:
         f.write(f"[Icon Theme]\nName={theme_name}\nComment=Converted from a Windows cursor pack\nInherits={inherit}\n")
 

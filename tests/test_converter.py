@@ -311,6 +311,19 @@ class TestRobustness(unittest.TestCase):
             cdir = os.path.join(built["Pack"], "cursors")
             self.assertGreaterEqual(len(os.listdir(cdir)), 1)
 
+    def test_fallbacks_leave_no_essential_missing(self):
+        """Even a one-cursor theme must resolve every FALLBACKS name."""
+        frames = C.static_frames(make_cur(make_png()), "arrow")
+        xc = C.xcur_from_frames(frames)
+        with tempfile.TemporaryDirectory() as tmp:
+            tdir = os.path.join(tmp, "Min")
+            C.write_theme({"left_ptr": (xc, 1, 0)}, tdir, "Min", "Adwaita")
+            cdir = os.path.join(tdir, "cursors")
+            for name, _cands in C.FALLBACKS:
+                with self.subTest(name=name):
+                    self.assertTrue(os.path.exists(os.path.join(cdir, name)),
+                                    f"essential {name} unresolvable")
+
     def test_hotspot_clamped_in_ladder(self):
         import struct as _st
         frames = [(b"\xff\x00\x00\xff" * 16, 100, 500, 500, 4, 4)]
