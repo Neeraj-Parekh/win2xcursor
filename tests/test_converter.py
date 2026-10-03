@@ -74,6 +74,7 @@ class TestRoles(unittest.TestCase):
             "Horizontal Resize": "sb_h_double_arrow",
             "Move": "fleur",
             "Unavailable": "crossed_circle",
+            "Clock": "watch",
             "Help Select": "help",
         }
         for name, role in cases.items():
@@ -171,7 +172,14 @@ class TestSpecCompliance(unittest.TestCase):
                     "top_left_corner", "top_right_corner",
                     "bottom_left_corner", "bottom_right_corner",
                     "ew-resize", "ns-resize", "ne-resize", "nw-resize",
-                    "se-resize", "sw-resize"]
+                    "se-resize", "sw-resize",
+                    # Qt + X core names (must resolve even in minimal themes)
+                    "pointing_hand", "whats_this", "size_ver", "size_hor",
+                    "split_v", "split_h", "openhand", "closedhand",
+                    "half-busy", "pointer-move", "clock",
+                    "up_arrow", "right_ptr", "sb_up_arrow", "top_tee",
+                    "ll_angle", "double_arrow", "draft_large", "circle",
+                    "color-picker", "pirate", "x_cursor"]
 
     def _full_roles(self):
         frames = C.static_frames(make_cur(make_png()), "arrow")
@@ -181,7 +189,7 @@ class TestSpecCompliance(unittest.TestCase):
                  "sb_h_double_arrow", "sb_v_double_arrow", "size_fdiag",
                  "size_bdiag", "crossed_circle", "fleur", "watch",
                  "left_ptr_watch", "grabbing", "pencil", "copy", "cell",
-                 "size_all", "zoom_in", "zoom_out", "context-menu"]}
+                 "zoom_in", "zoom_out", "context-menu"]}
 
     def test_alias_keys_are_producible_roles(self):
         """No dead ALIASES keys: every key must be producible by role_for."""
