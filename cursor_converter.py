@@ -224,10 +224,33 @@ def to_xcursor_bytes(rgba):
     out[3::4] = rgba[3::4]   # A
     return bytes(out)
 
-def xcur_from_frames(frames):
+def xcur_from_frames(frames, sizes=(24, 32, 48, 64, 96)):
+    """Build XCursor bytes with a multi-size ladder per frame.
+
+    Wayland compositors pick the chunk nearest their requested cursor size;
+    single-size (e.g. 128-only) themes render as white boxes on some paths
+    (notably resize cursors during tiling). Hotspots scale with size.
+    """
     chunks = []
     for rgba, delay, xh, yh, w, h in frames:
-        chunks.append((w, struct.pack("<9I", 36, 0xFFFD0002, w, 1, w, h, xh, yh, delay) + to_xcursor_bytes(rgba)))
+        try:
+            base = Image.frombytes("RGBA", (w, h), rgba)
+        except Exception:
+            continue
+        ladder = [s for s in sizes if s < max(w, h)]
+        ladder.append(max(w, h))
+        for s in ladder:
+            sw = s if w >= h else max(1, round(w * s / max(w, h)))
+            sh = s if h >= w else max(1, round(h * s / max(w, h)))
+            if (sw, sh) == (w, h):
+                scaled = to_xcursor_bytes(rgba)
+                sxh, syh = xh, yh
+            else:
+                im = base.resize((sw, sh), Image.LANCZOS)
+                scaled = to_xcursor_bytes(im.tobytes())
+                sxh = min(sw - 1, round(xh * sw / w))
+                syh = min(sh - 1, round(yh * sh / h))
+            chunks.append((sw, struct.pack("<9I", 36, 0xFFFD0002, sw, 1, sw, sh, sxh, syh, delay) + scaled))
     n = len(chunks)
     head = bytearray(b"Xcur") + struct.pack("<III", 16, 0x00010000, n)
     pos = 16 + 12 * n
