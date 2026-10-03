@@ -74,7 +74,7 @@ def current_theme():
         return "?"
 
 
-def xcur_first_frame(path, size=40, _depth=0):
+def xcur_first_frame(path, size=96, _depth=0):
     """Decode the first frame of an XCursor file into a PIL image (or None).
 
     Follows legacy redirection files (plain-text target name, e.g. Vimix's
@@ -100,17 +100,21 @@ def xcur_first_frame(path, size=40, _depth=0):
         ntoc, = struct.unpack_from("<I", data, 12)
         if ntoc == 0 or ntoc > 256 or 16 + 12 * ntoc > len(data):
             return None
-        pos = None
-        for i in range(ntoc):
+        best = None  # (width, pos): Xcursor files hold a size ladder;
+        for i in range(ntoc):  # preview wants the largest image, not chunk 0
             _type, _sub, p = struct.unpack_from("<III", data, 16 + 12 * i)
-            if _type == 0xFFFD0002:
-                pos = p
-                break
-        if pos is None or pos < 16 + 12 * ntoc or pos + 36 > len(data):
+            if _type != 0xFFFD0002:
+                continue
+            if p < 16 + 12 * ntoc or p + 36 > len(data):
+                continue
+            (_h, _t, _s, _v, w, h, _xh, _yh, _d) = struct.unpack_from("<9I", data, p)
+            if w <= 0 or h <= 0 or w > 512 or h > 512:
+                continue
+            if best is None or w * h > best[0] * best[1]:
+                best = (w, h, p)
+        if best is None:
             return None
-        (_h, _t, _s, _v, w, h, _xh, _yh, _d) = struct.unpack_from("<9I", data, pos)
-        if w <= 0 or h <= 0 or w > 512 or h > 512:
-            return None
+        w, h, pos = best
         px = data[pos + 36:pos + 36 + w * h * 4]
         if len(px) < w * h * 4:
             return None
@@ -125,7 +129,10 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("win2xcursor — Cursor Themes")
-        root.geometry("680x560")
+        root.geometry("760x640")
+        # Never let the window shrink past a usable layout: below this,
+        # buttons and previews get cut off instead of reflowing.
+        root.minsize(700, 560)
         root.configure(bg="#24273a")
         self.themes = {}
         self.info_var = tk.StringVar()
@@ -156,8 +163,10 @@ class App:
         self.prev.pack(fill="x", pady=(2, 8))
         self.prev_imgs = []
         for _ in PREVIEW_ROLES:
-            lab = tk.Label(self.prev, bg="#363a4f", fg="#cad3f5", width=9)
-            lab.pack(side="left", padx=6, pady=6)
+            cell = tk.Frame(self.prev, bg="#363a4f")
+            cell.pack(side="left", padx=8, pady=8)
+            lab = tk.Label(cell, bg="#363a4f", fg="#cad3f5", width=12)
+            lab.pack()
             self.prev_imgs.append(lab)
 
         tk.Label(right, textvariable=self.info_var, bg="#363a4f", fg="#cad3f5",
@@ -248,9 +257,10 @@ class App:
             if im is not None and HAS_IMAGETK:
                 ph = ImageTk.PhotoImage(im)
                 self.photos.append(ph)  # keep a reference
-                lab.configure(image=ph, text="")
+                lab.configure(image=ph, text=role, compound="top")
             else:
-                lab.configure(image="", text=role if (cdir and os.path.exists(os.path.join(cdir, role))) else "—")
+                lab.configure(image="", compound="none",
+                              text=role if (cdir and os.path.exists(os.path.join(cdir, role))) else "—")
 
     # -- actions --------------------------------------------------------
     def apply_selected(self):
