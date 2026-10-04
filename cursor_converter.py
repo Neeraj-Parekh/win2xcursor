@@ -533,6 +533,12 @@ FALLBACKS = [
     ("context-menu", ["context-menu", "left_ptr"]),
     ("zoom_in", ["zoom_in", "hand2", "left_ptr"]),
     ("zoom_out", ["zoom_out", "hand2", "left_ptr"]),
+    # Core resize roles: packs without resize art still resolve (else the
+    # real loader returns NULL and Mutter paints its gray fallback square).
+    ("sb_h_double_arrow", ["sb_h_double_arrow", "left_ptr"]),
+    ("sb_v_double_arrow", ["sb_v_double_arrow", "left_ptr"]),
+    ("size_fdiag", ["size_fdiag", "left_ptr"]),
+    ("size_bdiag", ["size_bdiag", "left_ptr"]),
     # Qt (QCursor docs table) — exact names Qt requests when Xcursor is enabled
     ("pointing_hand", ["pointing_hand", "hand2", "left_ptr"]),
     ("whats_this", ["whats_this", "help", "left_ptr"]),
@@ -616,6 +622,33 @@ def _apply_fallbacks(cdir):
                 os.symlink(cand, os.path.join(cdir, name))
                 break
 
+# Legacy X cursor hashes (XCURSOR_DISCOVER): old X apps request cursors by the
+# MD5 of the core glyph bitmap. Union collected from Vimix/Yaru/whiteglass;
+# values are the roles they resolve to there.
+HASH_ALIASES = {
+    "00000000000000020006000e7e9ffc3f": "left_ptr_watch",  # half-busy
+    "00008160000006810000408080010102": "sb_h_double_arrow",  # double_arrow
+    "028006030e0e7ebffc7f7070c0600140": "sb_h_double_arrow",  # col-resize
+    "03b6e0fcb3499374a867c041f52298f0": "crossed_circle",
+    "1081e37283d90000800003c07f3ef6bf": "copy",
+    "14fef782d02440884392942c11205230": "sb_h_double_arrow",  # col-resize
+    "2870a09082c103050810ffdffffe0204": "sb_h_double_arrow",  # double_arrow
+    "3085a0e285430894940527032f8b26df": "hand2",  # link
+    "3ecb610c1bf2410f44200f48c40d3599": "left_ptr_watch",  # half-busy
+    "5c6cd98b3f3ebcb1f9c7f1c204630408": "help",
+    "6407b0e94181790501fd1e167b474872": "copy",
+    "640fb0e74195791501fd1ed57b41487f": "hand2",  # link
+    "9081237383d90e509aa00f00170e968f": "fleur",
+    "9d800788f1b08800ae810202380a0822": "hand2",  # hand
+    "a2a266d0498c3104214a47bd64ab0fc8": "hand2",  # link
+    "b66166c04f8c3109214a4fbd64a50fc8": "left_ptr",  # unknown glyph: backstop
+    "c7088f0f3e6c8088236ef8e1e3e70000": "size_fdiag",  # bd_double_arrow
+    "d9ce0ab605698f320427677b458ad60b": "help",
+    "e29285e634086352946a0e7090d73106": "hand2",  # hand
+    "fcf1c3c7cd4491d801f1e1c78f100000": "size_bdiag",  # fd_double_arrow
+    "fcf21c00b30f7e3f83fe0dfd12e71cff": "fleur",
+}
+
 def _apply_aliases(cdir):
     for role, targets in ALIASES.items():
         if os.path.exists(os.path.join(cdir, role)):
@@ -633,6 +666,14 @@ def _apply_aliases(cdir):
                     os.symlink(role, p)
                 elif os.path.exists(os.path.join(cdir, "left_ptr")):
                     os.symlink("left_ptr", p)
+    # Legacy hash names resolve to their roles (or the arrow as backstop).
+    for h, role in HASH_ALIASES.items():
+        p = os.path.join(cdir, h)
+        if not os.path.exists(p):
+            if os.path.exists(os.path.join(cdir, role)):
+                os.symlink(role, p)
+            elif os.path.exists(os.path.join(cdir, "left_ptr")):
+                os.symlink("left_ptr", p)
 
 def write_theme(all_roles, tdir, theme_name, inherit):
     import shutil as _sh
