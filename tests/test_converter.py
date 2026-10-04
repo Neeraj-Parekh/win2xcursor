@@ -332,6 +332,25 @@ class TestRobustness(unittest.TestCase):
                     self.assertTrue(os.path.exists(os.path.join(cdir, name)),
                                     f"essential {name} unresolvable")
 
+    def test_alias_targets_resolve_without_source_roles(self):
+        """Regression: fallback-created roles must feed aliases.
+
+        Real case: 'grab' failed Mutter's loader because grabbing only
+        existed after fallbacks ran, and aliases ran first.
+        """
+        frames = C.static_frames(make_cur(make_png()), "arrow")
+        xc = C.xcur_from_frames(frames)
+        with tempfile.TemporaryDirectory() as tmp:
+            tdir = os.path.join(tmp, "Min")
+            C.write_theme({"left_ptr": (xc, 1, 0), "fleur": (xc, 1, 0)},
+                          tdir, "Min", "Adwaita")
+            cdir = os.path.join(tdir, "cursors")
+            for name in ("grab", "grabbing", "dnd-move", "dnd-none",
+                         "dnd-copy", "dnd-link", "move", "hand1"):
+                with self.subTest(name=name):
+                    self.assertTrue(os.path.exists(os.path.join(cdir, name)),
+                                    f"{name} missing despite sources present")
+
     def test_hotspot_clamped_in_ladder(self):
         import struct as _st
         frames = [(b"\xff\x00\x00\xff" * 16, 100, 500, 500, 4, 4)]

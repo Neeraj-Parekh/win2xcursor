@@ -601,7 +601,38 @@ FALLBACKS = [
     ("spider", ["spider", "left_ptr"]),
     ("x_cursor", ["x_cursor", "left_ptr"]),
     ("wayland-cursor", ["wayland-cursor", "left_ptr"]),
+    # Legacy X names Mutter tries second (meta_cursor_get_legacy_name).
+    # Modern name usually hits first; this closes the hole for good.
+    ("dnd-none", ["dnd-none", "crossed_circle", "left_ptr"]),
 ]
+
+def _apply_fallbacks(cdir):
+    """Ensure every FALLBACKS name resolves; first existing candidate wins."""
+    for name, candidates in FALLBACKS:
+        if os.path.exists(os.path.join(cdir, name)):
+            continue
+        for cand in candidates:
+            if cand != name and os.path.exists(os.path.join(cdir, cand)):
+                os.symlink(cand, os.path.join(cdir, name))
+                break
+
+def _apply_aliases(cdir):
+    for role, targets in ALIASES.items():
+        if os.path.exists(os.path.join(cdir, role)):
+            for a in targets:
+                p = os.path.join(cdir, a)
+                if not os.path.exists(p):
+                    os.symlink(role, p)
+    # Any alias target still missing falls back to its role, else the arrow.
+    # (Runs after fallbacks so fallback-created roles count as sources.)
+    for role, targets in ALIASES.items():
+        for a in targets:
+            p = os.path.join(cdir, a)
+            if not os.path.exists(p):
+                if os.path.exists(os.path.join(cdir, role)):
+                    os.symlink(role, p)
+                elif os.path.exists(os.path.join(cdir, "left_ptr")):
+                    os.symlink("left_ptr", p)
 
 def write_theme(all_roles, tdir, theme_name, inherit):
     import shutil as _sh
@@ -622,19 +653,10 @@ def write_theme(all_roles, tdir, theme_name, inherit):
             xc = entry
         with open(os.path.join(cdir, role), "wb") as f:
             f.write(xc)
-    for role, targets in ALIASES.items():
-        if os.path.exists(os.path.join(cdir, role)):
-            for a in targets:
-                p = os.path.join(cdir, a)
-                if not os.path.exists(p):
-                    os.symlink(role, p)
-    for name, candidates in FALLBACKS:
-        if os.path.exists(os.path.join(cdir, name)):
-            continue
-        for cand in candidates:
-            if cand != name and os.path.exists(os.path.join(cdir, cand)):
-                os.symlink(cand, os.path.join(cdir, name))
-                break
+    # Fallbacks run first so fallback-created roles (e.g. grabbing->fleur)
+    # count as alias sources below; alias auto-cover runs last.
+    _apply_fallbacks(cdir)
+    _apply_aliases(cdir)
     with open(os.path.join(tdir, "index.theme"), "w") as f:
         f.write(f"[Icon Theme]\nName={theme_name}\nComment=Converted from a Windows cursor pack\nInherits={inherit}\n")
 
